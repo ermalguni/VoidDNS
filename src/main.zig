@@ -1,70 +1,42 @@
 const std = @import("std");
-
-const Io = std.Io;
-const net = Io.net;
+const message = @import("dns/message.zig");
+const Record = @import("domains/record.zig");
+const udp = @import("server/udp.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const address = try net.IpAddress.parseIp4("127.0.0.1", 53);
-    const listener = try address.bind(
-        io,
-        .{
-            .mode = .dgram,
-            .protocol = .udp,
-        },
+    const allocator = init.gpa;
+
+    const buffer = try allocator.alloc(u8, message.packet_capacity);
+    defer allocator.free(buffer);
+
+    const address = try std.Io.net.IpAddress.parseIp4(
+        "127.0.0.1",
+        message.port,
     );
+    const listener = try address.bind(io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+    defer listener.close(io);
 
-    var buffer: [64 * 1024]u8 = undefined;
-    std.log.info("DNS Server listening on: {f} and is forwarding to 1.1.1.1:53", .{address});
-
-    while (true) {
-        const query = try listener.receive(io, &buffer);
-        if (query.data.len < 12 or query.data[2] & 0x80 != 0) continue;
-
-        const response = forward(io, query.data, &buffer) catch |err| {
-            std.log.warn("upstream request failed: {s}", .{@errorName(err)});
-            continue;
-        };
-
-        listener.send(io, &query.from, response) catch |err| {
-            std.log.warn("reply failed: {s}", .{@errorName(err)});
-            continue;
-        };
-    }
-}
-
-fn forward(io: Io, query: []const u8, buffer: []u8) ![]const u8 {
-    const upstream = try net.IpAddress.parseIp4("1.1.1.1", 53);
-    const local = try net.IpAddress.parseIp4("0.0.0.0", 0);
-    const socket = try local.bind(
-        io,
+    const records = [_]Record{
         .{
-            .mode = .dgram,
-            .protocol = .udp,
-        },
-    );
-    defer socket.close(io);
-
-    const id = [2]u8{ query[0], query[1] };
-    try socket.send(io, &upstream, query);
-
-    const timeout: Io.Timeout = .{
-        .deadline = Io.Clock.Timestamp.fromNow(
-            io,
-            .{
-                .raw = .fromSeconds(3),
-                .clock = .awake,
+            .name = "home.test",
+            .a = .{ 192, 0, 2, 10 },
+            .aaaa = .{
+                0x20, 0x01, 0x0d, 0xb8,
+                0,    0,    0,    0,
+                0,    0,    0,    0,
+                0,    0,    0,    0x10,
             },
-        ),
+        },
     };
 
-    while (true) {
-        const response = try socket.receiveTimeout(io, buffer, timeout);
-        if (!response.from.eql(&upstream)) continue;
-        if (response.data.len < 12) continue;
-        if (response.data[0] != id[0] or response.data[1] != id[1]) continue;
-        if (response.data[2] & 0x80 == 0) continue;
+    std.log.info(
+        "DNS listening on {f}; upstream port {d}",
+        .{ address, message.port },
+    );
 
-        return response.data;
-    }
+    try udp.serve(io, &listener, &records, buffer);
 }
