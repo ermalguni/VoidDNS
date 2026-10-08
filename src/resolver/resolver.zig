@@ -4,6 +4,7 @@ const decode = @import("../dns/decode.zig");
 const encode = @import("../dns/encode.zig");
 const UpstreamPool = @import("upstream.zig").Pool;
 const Cache = @import("../cache/cache.zig");
+const CacheKey = @import("../cache/key.zig");
 const edns = @import("../dns/edns.zig");
 const log = std.log.scoped(.resolver);
 
@@ -25,8 +26,8 @@ pub fn resolve(
     if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit|
         return hit;
 
-    var saved: [Cache.max_query]u8 = undefined;
-    const saved_key: ?[]const u8 = if (Cache.key(request)) |key| blk: {
+    var saved: [CacheKey.max_query]u8 = undefined;
+    const saved_key: ?[]const u8 = if (CacheKey.fromQuery(request)) |key| blk: {
         @memcpy(saved[0..key.len], key);
         break :blk saved[0..key.len];
     } else null;

@@ -30,6 +30,18 @@ Negative responses require an authority SOA and respect its negative-cache TTL.
 The cache is owned by the current single-threaded UDP server; concurrent access
 requires synchronization.
 
+Cache responsibilities are split across three files:
+
+- `src/cache/cache.zig`: slot allocation, lookup, expiration, and replacement.
+- `src/cache/key.zig`: query eligibility and borrowed, transaction-ID-independent
+  key bytes. The resolver saves these bytes before the response overwrites its buffer.
+- `src/cache/entry.zig`: response validation, packed entry allocation/freeing, and
+  replay with the client's transaction ID and aged TTLs.
+
+Each entry still uses one exact-sized allocation containing its key, response,
+and TTL offsets. The cache owns entries; entry creation and destruction use the
+cache's allocator. This split adds no allocation or packet copy to the query path.
+
 ### DNS cookies
 
 VoidDNS ignores DNS cookies; it does not provide cookie-based protection.
