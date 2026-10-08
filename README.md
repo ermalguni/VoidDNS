@@ -1,5 +1,20 @@
 # VoidDNS
 
+## Upstream resolvers
+
+`main` in `src/main.zig` defines the IPv4 upstream address list and owns its
+round-robin pool. The default order is `1.1.1.1:53`, `8.8.8.8:53`, then repeat.
+Addresses are parsed once at startup; the pool borrows the array without allocation.
+An empty list is rejected at initialization.
+
+Only forwarded queries advance the rotation. Cache hits and local answers do not.
+An exchange failure still advances the rotation for the next query; there is no
+automatic retry or failover within a query. The existing three-second upstream
+timeout remains unchanged.
+
+The pool is used by the sequential UDP serving loop. Concurrent forwarding would
+require synchronization of its index. Upstream sockets currently use IPv4.
+
 ## DNS cache
 
 Responses are cached in RAM before checking local records or forwarding upstream.

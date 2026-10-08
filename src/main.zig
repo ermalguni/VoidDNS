@@ -3,6 +3,7 @@ const message = @import("dns/message.zig");
 const Record = @import("domains/record.zig");
 const udp = @import("server/udp.zig");
 const Cache = @import("cache/cache.zig");
+const UpstreamPool = @import("resolver/upstream.zig").Pool;
 
 // Per-query logging is useful during development; use .info for normal operation.
 pub const std_options: std.Options = .{ .log_level = .debug };
@@ -10,6 +11,12 @@ pub const std_options: std.Options = .{ .log_level = .debug };
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+
+    const upstream_addresses = [_]std.Io.net.IpAddress{
+        try std.Io.net.IpAddress.parseIp4("1.1.1.1", message.port),
+        try std.Io.net.IpAddress.parseIp4("8.8.8.8", message.port),
+    };
+    var upstreams = try UpstreamPool.init(&upstream_addresses);
 
     var cache = try Cache.init(allocator, 4096);
     defer cache.deinit();
@@ -45,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         .{ address, message.port },
     );
 
-    try udp.serve(io, &listener, &records, buffer, &cache);
+    try udp.serve(io, &listener, &records, buffer, &cache, &upstreams);
 }
 
 test {

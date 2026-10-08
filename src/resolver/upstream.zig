@@ -11,13 +11,31 @@ const response_timeout: Io.Clock.Duration = .{
     .clock = .awake,
 };
 
-pub fn forward(io: Io, query: []const u8, buffer: []u8) ![]const u8 {
+/// Borrows main's address list; used by the sequential UDP serving loop.
+pub const Pool = struct {
+    addresses: []const net.IpAddress,
+    next_index: usize = 0,
+
+    pub fn init(addresses: []const net.IpAddress) !Pool {
+        if (addresses.len == 0) return error.NoUpstreams;
+        return .{ .addresses = addresses };
+    }
+
+    pub fn forward(self: *Pool, io: Io, query: []const u8, buffer: []u8) ![]const u8 {
+        const address = self.addresses[self.next_index];
+        // Advance even if the exchange fails; no retry within this query.
+        self.next_index += 1;
+        if (self.next_index == self.addresses.len) self.next_index = 0;
+        return exchange(io, address, query, buffer);
+    }
+};
+
+fn exchange(io: Io, upstream: net.IpAddress, query: []const u8, buffer: []u8) ![]const u8 {
     if (query.len < message.Header.len) {
         log.debug("forwarding bypass: query too short bytes={d}", .{query.len});
         return error.InvalidQuestion;
     }
 
-    const upstream = try net.IpAddress.parseIp4("1.1.1.1", message.port);
     const query_id = decode.id(query);
     log.debug("forwarding id={d} to={f} bytes={d}", .{ query_id, upstream, query.len });
     errdefer |err| log.warn("forwarding failed id={d} to={f}: {s}", .{

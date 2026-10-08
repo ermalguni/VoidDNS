@@ -5,6 +5,7 @@ const decode = @import("../dns/decode.zig");
 const resolver = @import("../resolver/resolver.zig");
 const Cache = @import("../cache/cache.zig");
 const Name = @import("../dns/name.zig");
+const UpstreamPool = @import("../resolver/upstream.zig").Pool;
 const log = std.log.scoped(.server);
 
 pub fn serve(
@@ -13,6 +14,7 @@ pub fn serve(
     records: []const Record,
     buffer: []u8,
     cache: *Cache,
+    upstreams: *UpstreamPool,
 ) !void {
     while (true) {
         const query = try listener.receive(io, buffer);
@@ -29,6 +31,7 @@ pub fn serve(
             buffer,
             records,
             cache,
+            upstreams,
         ) catch |err| {
             log.warn("resolution failed client={f} id={d}: {s}", .{
                 query.from, query_id, @errorName(err),
