@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "dns": {
+    "listen": {
+      "address": "127.0.0.1",
+      "port": 53
+    }
+  },
+  "upstream": {
+    "servers": [
+      { "address": "1.1.1.1", "port": 53 },
+      { "address": "8.8.8.8", "port": 53 }
+    ],
+    "timeout_ms": 3000
+  },
+  "cache": {
+    "capacity": 4096
+  },
+  "logging": {
+    "level": "debug"
+  }
+}

@@ -100,7 +100,7 @@ test "different client cookies share a local answer and restore the request ID" 
     const upstream_addresses = [_]std.Io.net.IpAddress{
         try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53),
     };
-    var upstreams = try UpstreamPool.init(&upstream_addresses);
+    var upstreams = try UpstreamPool.init(&upstream_addresses, 3000);
 
     @memcpy(buffer[0..first.len], first);
     _ = try resolve(std.testing.io, buffer[0..first.len], &buffer, &records, &cache, &upstreams);

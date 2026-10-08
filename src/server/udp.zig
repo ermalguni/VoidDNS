@@ -6,6 +6,7 @@ const resolver = @import("../resolver/resolver.zig");
 const Cache = @import("../cache/cache.zig");
 const Name = @import("../dns/name.zig");
 const UpstreamPool = @import("../resolver/upstream.zig").Pool;
+const logging = @import("../logging.zig");
 const log = std.log.scoped(.server);
 
 pub fn serve(
@@ -48,7 +49,7 @@ pub fn serve(
 }
 
 fn logQuery(client: std.Io.net.IpAddress, packet: []const u8) void {
-    if (!std.log.logEnabled(.debug, .server)) return;
+    if (!logging.enabled(.debug)) return;
 
     const question = decode.question(packet) catch |err| {
         log.debug("query client={f} id={d} question_unavailable={s}", .{

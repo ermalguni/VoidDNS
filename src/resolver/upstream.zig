@@ -6,19 +6,23 @@ const decode = @import("../dns/decode.zig");
 const log = std.log.scoped(.upstream);
 
 const automatic_port: u16 = 0;
-const response_timeout: Io.Clock.Duration = .{
-    .raw = .fromSeconds(3),
-    .clock = .awake,
-};
 
 /// Borrows main's address list; used by the sequential UDP serving loop.
 pub const Pool = struct {
     addresses: []const net.IpAddress,
+    response_timeout: Io.Clock.Duration,
     next_index: usize = 0,
 
-    pub fn init(addresses: []const net.IpAddress) !Pool {
+    pub fn init(addresses: []const net.IpAddress, timeout_ms: u32) !Pool {
         if (addresses.len == 0) return error.NoUpstreams;
-        return .{ .addresses = addresses };
+        if (timeout_ms == 0) return error.InvalidTimeout;
+        return .{
+            .addresses = addresses,
+            .response_timeout = .{
+                .raw = .fromMilliseconds(timeout_ms),
+                .clock = .awake,
+            },
+        };
     }
 
     pub fn forward(self: *Pool, io: Io, query: []const u8, buffer: []u8) ![]const u8 {
@@ -26,11 +30,17 @@ pub const Pool = struct {
         // Advance even if the exchange fails; no retry within this query.
         self.next_index += 1;
         if (self.next_index == self.addresses.len) self.next_index = 0;
-        return exchange(io, address, query, buffer);
+        return exchange(io, address, self.response_timeout, query, buffer);
     }
 };
 
-fn exchange(io: Io, upstream: net.IpAddress, query: []const u8, buffer: []u8) ![]const u8 {
+fn exchange(
+    io: Io,
+    upstream: net.IpAddress,
+    response_timeout: Io.Clock.Duration,
+    query: []const u8,
+    buffer: []u8,
+) ![]const u8 {
     if (query.len < message.Header.len) {
         log.debug("forwarding bypass: query too short bytes={d}", .{query.len});
         return error.InvalidQuestion;
@@ -80,4 +90,12 @@ fn exchange(io: Io, upstream: net.IpAddress, query: []const u8, buffer: []u8) ![
         });
         return response.data;
     }
+}
+
+test "pool requires upstreams and a positive response timeout" {
+    const addresses = [_]net.IpAddress{
+        try net.IpAddress.parseIp4("192.0.2.1", 53),
+    };
+    try std.testing.expectError(error.NoUpstreams, Pool.init(&.{}, 3000));
+    try std.testing.expectError(error.InvalidTimeout, Pool.init(&addresses, 0));
 }
