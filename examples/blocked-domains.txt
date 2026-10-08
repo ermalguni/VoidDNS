@@ -1,0 +1,3 @@
+# Exact domain names; explicit allows override imported entries.
+imported.example
+allowed.example

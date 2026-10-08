@@ -18,5 +18,33 @@
   },
   "logging": {
     "level": "debug"
+  },
+  "blocks": {
+    "lists": [
+      {
+        "id": "example-domains",
+        "name": "Example blocked domains",
+        "enabled": true,
+        "source": {
+          "kind": "file",
+          "value": "blocked-domains.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "first-blocklist",
+        "name": "HaGeZi Multi PRO mini",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt"
+        },
+        "format": "domains"
+      }
+    ],
+    "domains": ["explicit.example"]
+  },
+  "allows": {
+    "domains": ["allowed.example"]
   }
 }

@@ -27,11 +27,12 @@ pub fn main(init: std.process.Init) !void {
         std.log.err("usage: VoidDNS --config <path>", .{});
         return error.InvalidArguments;
     }
+    const path = args[2];
 
     var diagnostic: config.Diagnostic = .{};
-    var settings = config.load(allocator, io, args[2], &diagnostic) catch |err| {
+    var settings = config.load(allocator, io, path, &diagnostic) catch |err| {
         std.log.err("configuration '{s}': {s} ({s})", .{
-            args[2], diagnostic.text(), @errorName(err),
+            path, diagnostic.text(), @errorName(err),
         });
         return err;
     };
@@ -72,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
         .{ address, settings.upstream_addresses.len, settings.upstream_timeout_ms },
     );
 
-    try udp.serve(io, &listener, &records, buffer, &cache, &upstreams);
+    try udp.serve(io, &listener, &records, buffer, &cache, &upstreams, &settings.state);
 }
 
 test {

@@ -1,8 +1,10 @@
 const std = @import("std");
+const filtering = @import("state/filtering.zig");
+const State = @import("state/state.zig").State;
 
 pub const max_file_size = 1024 * 1024;
 
-/// Owns only the parsed upstream addresses, not the JSON input or its strings.
+/// Owns upstream addresses and RAM filtering state, not the JSON input.
 pub const Config = struct {
     listen_address: std.Io.net.IpAddress,
     upstream_addresses: []const std.Io.net.IpAddress,
@@ -10,8 +12,10 @@ pub const Config = struct {
     cache_capacity: usize,
     log_level: std.log.Level,
     allocator: std.mem.Allocator,
+    state: State,
 
     pub fn deinit(self: *Config) void {
+        self.state.deinit();
         self.allocator.free(self.upstream_addresses);
         self.* = undefined;
     }
@@ -61,15 +65,18 @@ pub fn load(
         return err;
     };
     defer allocator.free(contents);
-    return parse(allocator, contents, diagnostic);
+    return parse(allocator, io, contents, std.fs.path.dirname(path) orelse ".", diagnostic);
 }
 
 /// Parses a complete strict JSON document. The returned config does not borrow
 /// from `contents`; callers may release it immediately. Numbers must be JSON
 /// integer tokens, never quoted numbers, fractions, or exponent notation.
+/// Loads enabled filtering sources relative to base_dir before returning.
 pub fn parse(
     allocator: std.mem.Allocator,
+    io: std.Io,
     contents: []const u8,
+    base_dir: []const u8,
     diagnostic: *Diagnostic,
 ) !Config {
     diagnostic.* = .{};
@@ -96,7 +103,7 @@ pub fn parse(
     };
     defer parsed.deinit();
 
-    const root = try object(parsed.value, "$", &.{ "schema_version", "dns", "upstream", "cache", "logging" }, diagnostic);
+    const root = try object(parsed.value, "$", &.{ "schema_version", "dns", "upstream", "cache", "logging", "blocks", "allows" }, diagnostic);
     const version = try integer(u32, try required(root, "schema_version", "schema_version", diagnostic), "schema_version", 0, diagnostic);
     if (version != 1) return diagnostic.invalid("schema_version: unsupported version {d}; expected 1", .{version});
 
@@ -154,6 +161,11 @@ pub fn parse(
         addresses[index] = try address(server, path, null, diagnostic);
     }
 
+    const state = filtering.parse(allocator, io, root, base_dir) catch |err| {
+        diagnostic.set("blocks/allows: {s}", .{@errorName(err)});
+        return err;
+    };
+
     return .{
         .listen_address = listen_address,
         .upstream_addresses = addresses,
@@ -161,6 +173,7 @@ pub fn parse(
         .cache_capacity = cache_capacity,
         .log_level = log_level,
         .allocator = allocator,
+        .state = state,
     };
 }
 
@@ -213,13 +226,13 @@ const minimal_json =
 
 fn expectInvalid(contents: []const u8, expected_path: []const u8) !void {
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, contents, &diagnostic));
+    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, std.testing.io, contents, ".", &diagnostic));
     try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), expected_path) != null);
 }
 
 test "minimal configuration applies every optional default" {
     var diagnostic: Diagnostic = .{};
-    var config = try parse(std.testing.allocator, minimal_json, &diagnostic);
+    var config = try parse(std.testing.allocator, std.testing.io, minimal_json, ".", &diagnostic);
     defer config.deinit();
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, config.listen_address.ip4.bytes);
     try std.testing.expectEqual(@as(u16, 53), config.listen_address.ip4.port);
@@ -239,7 +252,7 @@ test "explicit configuration owns addresses and preserves upstream order" {
     );
     defer std.testing.allocator.free(input);
     var diagnostic: Diagnostic = .{};
-    var config = try parse(std.testing.allocator, input, &diagnostic);
+    var config = try parse(std.testing.allocator, std.testing.io, input, ".", &diagnostic);
     defer config.deinit();
     @memset(input, 0);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, config.listen_address.ip4.bytes);
@@ -256,8 +269,8 @@ test "explicit configuration owns addresses and preserves upstream order" {
 
 test "required fields and schema version are validated" {
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, "{\"schema_version\":2}", &diagnostic));
-    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, "{\"schema_version\":0}", &diagnostic));
+    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, std.testing.io, "{\"schema_version\":2}", ".", &diagnostic));
+    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, std.testing.io, "{\"schema_version\":0}", ".", &diagnostic));
     const cases = [_]struct { []const u8, []const u8 }{
         .{ "{}", "schema_version" },
         .{ "{\"schema_version\":\"1\"}", "schema_version" },
@@ -364,7 +377,7 @@ test "malformed JSON duplicate fields comments and trailing content are rejected
     };
     for (cases) |input| {
         var diagnostic: Diagnostic = .{};
-        try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, input, &diagnostic));
+        try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, std.testing.io, input, ".", &diagnostic));
     }
 }
 
@@ -374,9 +387,9 @@ test "parse and load accept exactly 1 MiB and reject larger input" {
     @memset(input, ' ');
     @memcpy(input[0..minimal_json.len], minimal_json);
     var diagnostic: Diagnostic = .{};
-    var config = try parse(std.testing.allocator, input[0..max_file_size], &diagnostic);
+    var config = try parse(std.testing.allocator, std.testing.io, input[0..max_file_size], ".", &diagnostic);
     config.deinit();
-    try std.testing.expectError(error.FileTooLarge, parse(std.testing.allocator, input, &diagnostic));
+    try std.testing.expectError(error.FileTooLarge, parse(std.testing.allocator, std.testing.io, input, ".", &diagnostic));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -393,10 +406,40 @@ test "parse and load accept exactly 1 MiB and reject larger input" {
 
 fn parseWithFailingAllocator(allocator: std.mem.Allocator) !void {
     var diagnostic: Diagnostic = .{};
-    var config = try parse(allocator, minimal_json, &diagnostic);
+    var config = try parse(allocator, std.testing.io, minimal_json, ".", &diagnostic);
     defer config.deinit();
 }
 
 test "allocation failures release partial parser and address ownership" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, parseWithFailingAllocator, .{});
+}
+
+test "unified configuration owns explicit filtering and loads paths relative to its file" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "domains.txt", .data = "Imported.Example.\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data =
+        \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+        \\"blocks":{"domains":["Blocked.Example."],"lists":[
+        \\{"id":"file","source":{"kind":"file","value":"domains.txt"},"format":"domains"}]},
+        \\"allows":{"domains":["Allowed.Example"]}}
+    });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.json", allocator);
+    defer allocator.free(path);
+    var diagnostic: Diagnostic = .{};
+    var config = try load(allocator, std.testing.io, path, &diagnostic);
+    defer config.deinit();
+    try std.testing.expect(config.state.domains.isBlocked("blocked.example"));
+    try std.testing.expect(config.state.domains.isAllowed("allowed.example"));
+    try std.testing.expect(config.state.lists.contains("imported.example"));
+    try std.testing.expect(!config.state.lists.contains("sub.imported.example"));
+}
+
+test "unified filtering retains strict nested validation" {
+    var diagnostic: Diagnostic = .{};
+    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
+    try std.testing.expectError(error.UnknownStateField, parse(std.testing.allocator, std.testing.io, prefix ++ "\"blocks\":{\"unknown\":true}}", ".", &diagnostic));
+    try std.testing.expectError(error.ExpectedStateArray, parse(std.testing.allocator, std.testing.io, prefix ++ "\"allows\":{\"domains\":\"wrong\"}}", ".", &diagnostic));
+    try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, std.testing.io, prefix ++ "\"blocks\":{\"domains\":[],\"domains\":[]}}", ".", &diagnostic));
 }

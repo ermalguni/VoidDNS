@@ -43,16 +43,151 @@ identify the field, including upstream array indices; JSON syntax errors include
 line and column.
 
 `src/config.zig` reads and validates the file once and converts address strings
-into binary addresses. It retains only the owned upstream address array; JSON
+into binary addresses and builds the owned RAM filtering state. JSON
 buffers and parser allocations are released before serving. `main.zig` keeps
 configuration alive while the upstream pool borrows it and passes individual
 settings into services. Colocated configuration tests run through `zig build test`.
 
 The daemon never rewrites the file. Changes require a restart; there is no live
-reload. This file owns local startup settings, not API/peer-managed records,
-allow/block entries, or blocklist sources. Managed-state persistence remains a
-separate design decision. The existing hard-coded `home.test` A/AAAA example is
+reload. This file owns local startup settings, explicit allow/block entries, and
+blocklist definitions. Future API/peer-managed writes need a separate ownership
+and persistence contract. The hard-coded `home.test` A/AAAA example remains
 unchanged and is not configurable through this file.
+
+## Domain filtering and blocklists
+
+```sh
+zig build run -- --config examples/voiddns.json
+```
+
+[`examples/voiddns.json`](examples/voiddns.json) includes both startup settings and
+filtering definitions. It keeps the file-backed `example-domains` list and adds
+`first-blocklist`, [HaGeZi Multi PRO mini](https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt)
+in plain-domain format. Despite the source URL's `/wildcard/` directory, VoidDNS
+matches these names exactly; it does not infer subdomain blocking.
+The example requires internet access to load that enabled source.
+
+The file is authoritative, not a seed merged with another store. Edit it while
+the daemon is stopped and restart to apply changes. Omit `blocks` and `allows`
+for empty filtering sets. The separate state file and `--state` flag are removed;
+move their `blocks` and `allows` sections into the `--config` file.
+
+```json
+{
+  "schema_version": 1,
+  "upstream": {
+    "servers": [{"address": "1.1.1.1"}]
+  },
+  "blocks": {
+    "lists": [
+      {
+        "id": "tracking",
+        "name": "Tracking domains",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://example.org/tracking.txt"
+        },
+        "format": "domains"
+      }
+    ],
+    "domains": ["blocked.example"]
+  },
+  "allows": {
+    "domains": ["allowed.example"]
+  }
+}
+```
+
+The document requires `schema_version: 1` and the upstream settings described
+above. Omitted `blocks`, `allows`, `lists`, and `domains` are empty. Unknown and
+duplicate fields, wrong types, and unsupported versions are rejected.
+The complete configuration file is limited to 1 MiB.
+Every list requires `id`, `source.kind`, `source.value`, and `format`:
+
+| Field | Rules |
+| --- | --- |
+| `id` | Unique stable ID, 1–128 ASCII letters/digits or `.`, `_`, `-`; changing a display name does not change identity |
+| `name` | Optional nonempty display name, up to 256 printable ASCII bytes |
+| `enabled` | Defaults to `true`; disabled sources are validated but not loaded |
+| `source.kind` | `url` or `file` |
+| `source.value` | HTTP/HTTPS URL or filesystem path; URL credentials and fragments are rejected |
+| `format` | Required: `domains` for URLs; `domains` or `hosts` for local files |
+
+Relative file sources resolve against the **configuration file's directory**, not
+the working directory. Relative `--config` paths resolve against the working directory.
+HTTP/HTTPS loads require a successful status; HTTPS uses system CA verification.
+Each list is limited to 32 MiB after decompression. Downloads currently have no
+whole-request deadline, so an unresponsive source can delay startup.
+
+### Supported list formats
+
+- URL sources accept only one domain per line, blank lines, and `#` comments.
+  `format: "hosts"` is rejected for URLs, even when disabled. Hosts rows, Adblock
+  rules, HTML, multiple domains on a line, and other invalid content fail the
+  complete import rather than being skipped. No format autodetection is performed.
+- `domains`: one domain per line, for URL or local-file sources.
+- `hosts`: local files only; an IPv4/IPv6 literal followed by one or more domain
+  aliases. The address is ignored: imported names always use the sinkhole policy.
+- Both accept blank lines, CRLF, and `#` comments, including inline comments.
+  Duplicate names are deduplicated. Hosts-format imports ignore customary local
+  aliases such as `localhost`, `localhost.localdomain`, and `ip6-localhost`.
+- Names are ASCII, case-insensitive, with an optional trailing dot. Labels are
+  1–63 bytes, total length at most 253 bytes excluding the trailing dot.
+  Letters, digits, hyphens, and underscores are accepted; labels cannot start or
+  end with a hyphen. Use ASCII punycode for internationalized names.
+- Wildcards, Adblock syntax, URL rules, IP-literal domain entries, and malformed
+  lines are rejected. One malformed line rejects the complete import.
+
+Matching is **exact**, never implicit suffix matching: blocking `example.org`
+does not block `www.example.org`.
+
+### Precedence and responses
+
+1. Explicit block → sinkhole, even if also explicitly allowed or local.
+2. Explicit allow → bypass imported lists; use a matching local answer, otherwise
+   cache/upstream.
+3. Matching local DNS record → local answer.
+4. Imported block → sinkhole.
+5. Otherwise → cache/upstream.
+
+A matching local answer currently means an available IN `A`/`AAAA` record for
+the requested type. Blocked IN `A` requests receive `0.0.0.0`; blocked IN `AAAA`
+requests receive `::`. Both use TTL zero. Other blocked types/classes receive
+`NOERROR` with no answer records (NODATA), without an authority SOA.
+Generated local and sinkhole answers are not inserted into the response cache.
+Malformed/unsupported DNS questions are rejected rather than forwarded around
+the policy checks.
+
+### Ownership, updates, and limits
+
+All enabled lists must load successfully **before binding the listener**. Missing
+files, failed downloads, malformed content, or invalid definitions stop startup.
+Definitions survive restarts in the configuration file; downloaded snapshots do not.
+Each restart reloads the configured sources, so offline restart requires locally
+available sources. No management HTTP endpoints, automatic refresh scheduler,
+live file reload, or peer synchronization are implemented by this feature.
+
+The in-process blocklist service supports add, replace, refresh, and remove.
+Failed replacements/refreshes retain the previous complete snapshot. Source
+membership is preserved: deleting or refreshing one source cannot remove a name
+still provided by another. Explicit blocks remain independent of imported names.
+These mutation operations require exclusive access; the current daemon finishes
+loading before its sequential query loop starts and does not mutate state while
+serving. Future concurrent writers need synchronized publication/reclamation.
+
+- `domains/domain.zig` and `domains/store.zig`: normalization and explicit sets.
+- `blocklist/source.zig`, `fetch.zig`, `parse.zig`: definitions and bounded import.
+- `blocklist/index.zig`: RAM hash index with one interned name per unique domain,
+  membership counts, and per-source slices referencing those names.
+- `blocklist/service.zig`: owned source lifecycle and transactional replacement.
+- `state/state.zig`, `state/filtering.zig`: state ownership and filtering schema loading.
+- `policy/policy.zig`: precedence; `resolver/resolver.zig`: response construction
+  and policy-before-cache dispatch.
+
+Queries perform allocation-free RAM lookups; list I/O and parsing never run in
+the DNS query path. Colocated parser, membership, refresh, state, and resolver
+tests run through `zig build test`.
 
 ## Upstream resolvers
 
@@ -72,8 +207,9 @@ require synchronization of its index. Upstream sockets currently use IPv4.
 
 ## DNS cache
 
-Responses are cached in RAM before checking local records or forwarding upstream.
-`cache.capacity` configures the slot count; record TTLs determine expiry.
+Responses are looked up in the RAM cache only after filtering policy and local
+answers. Only upstream responses are inserted. `cache.capacity` configures the
+slot count; record TTLs determine expiry.
 Hits age returned TTLs without extending expiry.
 
 The cache uses direct-mapped slots and exact-sized packet storage. Hash collisions
@@ -136,6 +272,9 @@ logs; select `"debug"` when diagnosing individual requests.
 - `upstream`: forwarding destination, received response size and RCODE,
   ignored-packet reasons, and forwarding failures (including receive timeouts).
   Forwarding failures use warning level.
+- `blocklist`: source ID/name, lifecycle action, imported count, unique total,
+  and import failures. Source URLs and filesystem paths are not logged by the
+  blocklist service.
 
 Binding port 53 requires appropriate permissions. Debug request logs contain
 client addresses and queried domains;
