@@ -2,10 +2,17 @@ const std = @import("std");
 const message = @import("dns/message.zig");
 const Record = @import("domains/record.zig");
 const udp = @import("server/udp.zig");
+const Cache = @import("cache/cache.zig");
+
+// Per-query logging is useful during development; use .info for normal operation.
+pub const std_options: std.Options = .{ .log_level = .debug };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+
+    var cache = try Cache.init(allocator, 4096);
+    defer cache.deinit();
 
     const buffer = try allocator.alloc(u8, message.packet_capacity);
     defer allocator.free(buffer);
@@ -38,5 +45,10 @@ pub fn main(init: std.process.Init) !void {
         .{ address, message.port },
     );
 
-    try udp.serve(io, &listener, &records, buffer);
+    try udp.serve(io, &listener, &records, buffer, &cache);
+}
+
+test {
+    _ = @import("dns/edns.zig");
+    _ = @import("resolver/resolver.zig");
 }

@@ -3,8 +3,56 @@ const Record = @import("../domains/record.zig");
 const decode = @import("../dns/decode.zig");
 const encode = @import("../dns/encode.zig");
 const upstream = @import("upstream.zig");
+const Cache = @import("../cache/cache.zig");
+const edns = @import("../dns/edns.zig");
+const log = std.log.scoped(.resolver);
 
 pub fn resolve(
+    io: std.Io,
+    query: []const u8,
+    buffer: []u8,
+    records: []const Record,
+    cache: *Cache,
+) ![]const u8 {
+    const normalized = try edns.stripCookies(query, buffer);
+    const request = normalized.packet;
+    if (normalized.cookies_removed != 0) {
+        log.debug("ignored query COOKIE id={d} removed={d}; cookie protection disabled", .{
+            decode.id(request), normalized.cookies_removed,
+        });
+    }
+    if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit|
+        return hit;
+
+    var saved: [Cache.max_query]u8 = undefined;
+    const saved_key: ?[]const u8 = if (Cache.key(request)) |key| blk: {
+        @memcpy(saved[0..key.len], key);
+        break :blk saved[0..key.len];
+    } else null;
+
+    const received = try resolveMiss(io, request, buffer, records);
+    const sanitized = try edns.stripCookies(received, buffer);
+    const response = sanitized.packet;
+    if (sanitized.cookies_removed != 0) {
+        log.debug("removed unsolicited response COOKIE id={d} removed={d}", .{
+            decode.id(response), sanitized.cookies_removed,
+        });
+    }
+
+    if (saved_key) |key| {
+        cache.put(
+            key,
+            response,
+            std.Io.Clock.awake.now(io).toSeconds(),
+        ) catch |err| {
+            std.log.warn("cache insertion failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    return response;
+}
+
+fn resolveMiss(
     io: std.Io,
     query: []const u8,
     buffer: []u8,
@@ -34,4 +82,27 @@ pub fn resolve(
     }
 
     return upstream.forward(io, query, buffer);
+}
+
+test "different client cookies share a local answer and restore the request ID" {
+    const prefix = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01" ++
+        "\x04home\x04test\x00\x00\x01\x00\x01" ++
+        "\x00\x00\x29\x04\xd0\x00\x00\x00\x00\x00\x0c\x00\x0a\x00\x08";
+    const first = prefix ++ "abcdefgh";
+    const second = prefix ++ "12345678";
+    var cache = try Cache.init(std.testing.allocator, 16);
+    defer cache.deinit();
+    var buffer: [512]u8 = undefined;
+    const records = [_]Record{.{ .name = "home.test", .a = .{ 192, 0, 2, 10 } }};
+
+    @memcpy(buffer[0..first.len], first);
+    _ = try resolve(std.testing.io, buffer[0..first.len], &buffer, &records, &cache);
+    @memcpy(buffer[0..second.len], second);
+    buffer[0] = 0xab;
+    // A changed local value distinguishes a cache hit from resolving again.
+    const changed_records = [_]Record{.{ .name = "home.test", .a = .{ 192, 0, 2, 99 } }};
+    const response = try resolve(std.testing.io, buffer[0..second.len], &buffer, &changed_records, &cache);
+    try std.testing.expectEqual(@as(u16, 0xab34), decode.id(response));
+    try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 10 }, response[response.len - 4 ..]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, response[10..12], .big));
 }
