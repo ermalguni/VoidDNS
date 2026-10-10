@@ -1,14 +1,14 @@
 const std = @import("std");
 
-var current_level: std.log.Level = .info;
+var current_level: std.atomic.Value(u8) = .init(@intFromEnum(std.log.Level.info));
 
-/// Configure once during startup, before serving queries.
+/// Main changes the threshold between DNS workers; control may still log.
 pub fn setLevel(level: std.log.Level) void {
-    current_level = level;
+    current_level.store(@intFromEnum(level), .monotonic);
 }
 
 pub fn enabled(comptime level: std.log.Level) bool {
-    return @intFromEnum(level) <= @intFromEnum(current_level);
+    return @intFromEnum(level) <= current_level.load(.monotonic);
 }
 
 pub fn logFn(
@@ -22,7 +22,7 @@ pub fn logFn(
 }
 
 test "runtime log level includes only the selected severity and higher" {
-    const previous_level = current_level;
+    const previous_level: std.log.Level = @enumFromInt(current_level.load(.monotonic));
     defer setLevel(previous_level);
 
     const cases = .{

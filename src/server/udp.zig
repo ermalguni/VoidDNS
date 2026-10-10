@@ -37,6 +37,7 @@ pub fn serve(
             upstreams,
             state,
         ) catch |err| {
+            if (err == error.Canceled) return err;
             log.warn("resolution failed client={f} id={d}: {s}", .{
                 query.from, query_id, @errorName(err),
             });
@@ -44,6 +45,7 @@ pub fn serve(
         };
 
         listener.send(io, &query.from, response) catch |err| {
+            if (err == error.Canceled) return err;
             log.warn("reply failed client={f} id={d}: {s}", .{
                 query.from, query_id, @errorName(err),
             });

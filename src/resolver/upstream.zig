@@ -7,7 +7,7 @@ const log = std.log.scoped(.upstream);
 
 const automatic_port: u16 = 0;
 
-/// Borrows main's address list; used by the sequential UDP serving loop.
+/// Borrows its generation's address list; used by the sequential UDP worker.
 pub const Pool = struct {
     addresses: []const net.IpAddress,
     response_timeout: Io.Clock.Duration,
@@ -48,9 +48,11 @@ fn exchange(
 
     const query_id = decode.id(query);
     log.debug("forwarding id={d} to={f} bytes={d}", .{ query_id, upstream, query.len });
-    errdefer |err| log.warn("forwarding failed id={d} to={f}: {s}", .{
-        query_id, upstream, @errorName(err),
-    });
+    errdefer |err| {
+        if (err != error.Canceled) log.warn("forwarding failed id={d} to={f}: {s}", .{
+            query_id, upstream, @errorName(err),
+        });
+    }
     const local = try net.IpAddress.parseIp4("0.0.0.0", automatic_port);
     const socket = try local.bind(io, .{
         .mode = .dgram,
