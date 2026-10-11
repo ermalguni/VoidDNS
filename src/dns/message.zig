@@ -25,6 +25,7 @@ pub const Header = struct {
 pub const Flags = struct {
     pub const response: u16 = 0x8000;
     pub const opcode_mask: u16 = 0x7800;
+    pub const truncated: u16 = 0x0200;
     pub const recursion_desired: u16 = 0x0100;
     pub const recursion_available: u16 = 0x0080;
     pub const checking_disabled: u16 = 0x0010;

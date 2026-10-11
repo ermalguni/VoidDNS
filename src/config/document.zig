@@ -25,6 +25,12 @@ pub const Document = struct {
     logging: struct {
         level: std.log.Level = .info,
     } = .{},
+    records: []const struct {
+        name: []const u8,
+        type: enum { A, AAAA },
+        ttl: u32 = 60,
+        addresses: []const []const u8,
+    } = &.{},
     blocks: struct {
         lists: []const Source = &.{},
         domains: []const []const u8 = &.{},

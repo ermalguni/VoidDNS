@@ -28,7 +28,9 @@ pub fn resolve(
             decode.id(request), normalized.cookies_removed,
         });
     }
-    if (try managedAnswer(request, buffer, records, state)) |response|
+    // Snapshot all request metadata before an aliased response overwrites it.
+    const response_buffer = buffer[0..@min(buffer.len, normalized.udp_payload_size)];
+    if (try managedAnswer(request, response_buffer, records, state)) |response|
         return response;
 
     if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit|
@@ -75,7 +77,7 @@ fn managedAnswer(
     var local: ?*const Record = null;
     if (question.qclass == .internet) {
         for (records) |*record| {
-            if (record.data(question.qtype) != null and question.name.matches(record.name)) {
+            if (record.recordType() == question.qtype and question.name.matches(record.name)) {
                 local = record;
                 break;
             }
@@ -84,7 +86,7 @@ fn managedAnswer(
 
     return switch (policy.decide(state, canonical, local != null)) {
         .block => try blockedAnswer(&question, buffer),
-        .local => try encode.address(&question, local.?.data(question.qtype).?, local.?.ttl_seconds, buffer),
+        .local => try encode.rrset(&question, local.?, buffer),
         .forward => null,
     };
 }
@@ -125,11 +127,10 @@ test "explicit blocks override allows and local records with zero TTL sinkholes 
     defer cache.deinit();
     const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
     var upstreams = try UpstreamPool.init(&addresses, 3000);
-    const records = [_]Record{.{
-        .name = "home.test",
-        .a = .{ 192, 0, 2, 10 },
-        .aaaa = [_]u8{1} ** 16,
-    }};
+    const records = [_]Record{
+        .{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } },
+        .{ .name = "home.test", .addresses = .{ .aaaa = &.{[_]u8{1} ** 16} } },
+    };
     const cases = [_]struct { qtype: u16, qclass: u16, data_len: usize }{
         .{ .qtype = 1, .qclass = 1, .data_len = 4 },
         .{ .qtype = 28, .qclass = 1, .data_len = 16 },
@@ -199,7 +200,7 @@ test "allows bypass imported blocks while local answers precede imports and cach
     try cache.put(CacheKey.fromQuery(test_query).?, upstream_answer, std.Io.Clock.awake.now(std.testing.io).toSeconds());
     const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
     var upstreams = try UpstreamPool.init(&addresses, 3000);
-    const records = [_]Record{.{ .name = "home.test", .a = .{ 192, 0, 2, 10 } }};
+    const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
 
     // A local answer wins over both an imported block and an upstream cache hit.
     const local = try resolve(std.testing.io, test_query, &buffer, &records, &cache, &upstreams, &state);
@@ -224,7 +225,7 @@ test "COOKIE normalization preserves local responses and request IDs without cac
     defer cache.deinit();
     const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
     var upstreams = try UpstreamPool.init(&addresses, 3000);
-    const records = [_]Record{.{ .name = "home.test", .a = .{ 192, 0, 2, 10 } }};
+    const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
     for ([_][]const u8{ "abcdefgh", "12345678" }, 0..) |cookie, i| {
         var buffer: [512]u8 = undefined;
         @memcpy(buffer[0..prefix.len], prefix);
@@ -265,4 +266,136 @@ test "policy does not bypass signed COOKIE and malformed option rejection" {
     @memcpy(buffer[0..test_query.len], test_query);
     buffer[5] = 2;
     try std.testing.expectError(error.UnsupportedQuestion, resolve(std.testing.io, buffer[0..test_query.len], &buffer, &.{}, &cache, &upstreams, &state));
+}
+
+test "local RRsets return every address in order with shared TTL and matching family" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    var cache = try Cache.init(std.testing.allocator, 0);
+    defer cache.deinit();
+    const upstream_addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
+    var upstreams = try UpstreamPool.init(&upstream_addresses, 3000);
+    const records = [_]Record{
+        .{
+            .name = "home.test",
+            .ttl_seconds = 0,
+            .addresses = .{ .a = &.{ .{ 192, 0, 2, 10 }, .{ 192, 0, 2, 11 }, .{ 192, 0, 2, 12 } } },
+        },
+        .{
+            .name = "home.test",
+            .ttl_seconds = 12345,
+            .addresses = .{ .aaaa = &.{ [_]u8{1} ** 16, [_]u8{2} ** 16 } },
+        },
+    };
+    for (&records) |*record| {
+        var buffer: [1232]u8 = undefined;
+        @memcpy(buffer[0..test_query.len], test_query);
+        std.mem.writeInt(u16, buffer[test_query.len - 4 ..][0..2], @intFromEnum(record.recordType()), .big);
+        const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &records, &cache, &upstreams, &state);
+        try std.testing.expectEqual(@as(u16, 0x1234), decode.id(response));
+        try std.testing.expectEqual(@as(u16, 0x8190), decode.flags(response));
+        try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, response[4..6]);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, response[8..12]);
+        try std.testing.expectEqualSlices(u8, test_query[12 .. test_query.len - 4], response[12 .. test_query.len - 4]);
+        var cursor: usize = test_query.len;
+        switch (record.addresses) {
+            inline else => |addresses| {
+                try std.testing.expectEqual(addresses.len, std.mem.readInt(u16, response[6..8], .big));
+                for (addresses) |*expected| {
+                    try std.testing.expectEqual(@as(u16, 0xc00c), std.mem.readInt(u16, response[cursor..][0..2], .big));
+                    try std.testing.expectEqual(@intFromEnum(record.recordType()), std.mem.readInt(u16, response[cursor + 2 ..][0..2], .big));
+                    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, response[cursor + 4 ..][0..2], .big));
+                    try std.testing.expectEqual(record.ttl_seconds, std.mem.readInt(u32, response[cursor + 6 ..][0..4], .big));
+                    try std.testing.expectEqual(expected.len, std.mem.readInt(u16, response[cursor + 10 ..][0..2], .big));
+                    try std.testing.expectEqualSlices(u8, expected, response[cursor + 12 ..][0..expected.len]);
+                    cursor += 12 + expected.len;
+                }
+            },
+        }
+        try std.testing.expectEqual(cursor, response.len);
+    }
+}
+
+test "local RRsets truncate atomically at legacy EDNS and output buffer limits" {
+    const long_name = "a" ** 63 ++ "." ++ "b" ** 63 ++ "." ++ "c" ** 63 ++ "." ++ "d" ** 61;
+    const long_question = "\x12\x34\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00" ++
+        "\x3f" ++ "a" ** 63 ++ "\x3f" ++ "b" ** 63 ++ "\x3f" ++ "c" ** 63 ++ "\x3d" ++ "d" ** 61 ++
+        "\x00\x00\x01\x00\x01";
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    var cache = try Cache.init(std.testing.allocator, 0);
+    defer cache.deinit();
+    const upstream_addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
+    var upstreams = try UpstreamPool.init(&upstream_addresses, 3000);
+    var ipv4: [16][4]u8 = undefined;
+    var ipv6: [16][16]u8 = undefined;
+    for (&ipv4, &ipv6, 0..) |*a, *aaaa, i| {
+        a.* = .{ 192, 0, 2, @intCast(i + 1) };
+        aaaa.* = [_]u8{0} ** 16;
+        aaaa[15] = @intCast(i + 1);
+    }
+    const records = [_]Record{
+        .{ .name = long_name, .addresses = .{ .a = &ipv4 } },
+        .{ .name = long_name, .addresses = .{ .aaaa = &ipv6 } },
+    };
+    for (&records) |*record| {
+        const address_len: usize = if (record.recordType() == .a) 4 else 16;
+        const complete_len = long_question.len + 16 * (12 + address_len);
+        const cases = [_]struct { advertised: ?u16, capacity: usize, cookie: bool = false, truncated: bool }{
+            .{ .advertised = null, .capacity = 1232, .truncated = true },
+            .{ .advertised = 128, .capacity = 1232, .truncated = true },
+            .{ .advertised = 512, .capacity = 1232, .truncated = true },
+            .{ .advertised = @intCast(complete_len - 1), .capacity = 1232, .truncated = true },
+            .{ .advertised = @intCast(complete_len), .capacity = 1232, .truncated = false },
+            .{ .advertised = 1232, .capacity = 512, .truncated = true },
+            .{ .advertised = 1232, .capacity = 1232, .truncated = false },
+            .{ .advertised = 1232, .capacity = 1232, .cookie = true, .truncated = false },
+        };
+        for (cases) |case| {
+            var buffer: [1232]u8 = undefined;
+            @memcpy(buffer[0..long_question.len], long_question);
+            std.mem.writeInt(u16, buffer[long_question.len - 4 ..][0..2], @intFromEnum(record.recordType()), .big);
+            var query_len: usize = long_question.len;
+            if (case.advertised) |size| {
+                buffer[11] = 1;
+                const opt = "\x00\x00\x29\x00\x00\x00\x00\x00\x00\x00\x00";
+                @memcpy(buffer[query_len..][0..opt.len], opt);
+                std.mem.writeInt(u16, buffer[query_len + 3 ..][0..2], size, .big);
+                if (case.cookie) {
+                    buffer[query_len + 10] = 12;
+                    const cookie = "\x00\x0a\x00\x08abcdefgh";
+                    @memcpy(buffer[query_len + opt.len ..][0..cookie.len], cookie);
+                    query_len += cookie.len;
+                }
+                query_len += opt.len;
+            }
+            const response = try resolve(std.testing.io, buffer[0..query_len], buffer[0..case.capacity], &records, &cache, &upstreams, &state);
+            try std.testing.expectEqual(@as(u16, 0x1234), decode.id(response));
+            try std.testing.expectEqual(@as(u16, if (case.truncated) 0x8390 else 0x8190), decode.flags(response));
+            try std.testing.expectEqual(@as(u16, if (case.truncated) 0 else 16), std.mem.readInt(u16, response[6..8], .big));
+            try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, response[4..6]);
+            try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, response[8..12]);
+            try std.testing.expectEqualSlices(u8, long_question[12 .. long_question.len - 4], response[12 .. long_question.len - 4]);
+            try std.testing.expectEqual(if (case.truncated) long_question.len else complete_len, response.len);
+        }
+    }
+}
+
+test "missing local address family falls through policy without suppressing blocks" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
+    var query: [test_query.len]u8 = undefined;
+    @memcpy(&query, test_query);
+    std.mem.writeInt(u16, query[test_query.len - 4 ..][0..2], 28, .big);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &records, &state));
+    try importTestNames(&state);
+    const blocked = (try managedAnswer(&query, &buffer, &records, &state)).?;
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, blocked[6..8], .big));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), blocked[blocked.len - 16 ..]);
+    try state.domains.allow("home.test");
+    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &records, &state));
+    try state.domains.block("home.test");
+    try std.testing.expect((try managedAnswer(&query, &buffer, &records, &state)) != null);
 }

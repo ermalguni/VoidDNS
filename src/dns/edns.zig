@@ -9,6 +9,7 @@ const padding_code = 12;
 pub const Result = struct {
     packet: []const u8,
     cookies_removed: usize = 0,
+    udp_payload_size: u16 = 512,
 };
 
 // Output may be the same buffer as input, or a separate, non-overlapping buffer.
@@ -46,6 +47,7 @@ pub fn stripCookies(packet: []const u8, output: []u8) !Result {
     }
     if (cursor != packet.len) return error.InvalidMessage;
     const record = opt orelse return .{ .packet = packet };
+    const udp_payload_size = @max(512, read16(packet, record.fields + 2));
 
     // Validate every option before modifying an aliased receive buffer.
     var cookies: usize = 0;
@@ -57,7 +59,7 @@ pub fn stripCookies(packet: []const u8, output: []u8) !Result {
         if (read16(packet, cursor) == cookie_code) cookies += 1;
         cursor = end;
     }
-    if (cookies == 0) return .{ .packet = packet };
+    if (cookies == 0) return .{ .packet = packet, .udp_payload_size = udp_payload_size };
     if (authenticated) return error.AuthenticatedCookie;
     // A response must not gain unsolicited Padding. A non-final OPT cannot
     // shrink safely without relocating later compressed records, so reject this
@@ -86,10 +88,18 @@ pub fn stripCookies(packet: []const u8, output: []u8) !Result {
         cursor = end;
     }
     if (record.end != packet.len)
-        return .{ .packet = output[0..packet.len], .cookies_removed = cookies };
+        return .{
+            .packet = output[0..packet.len],
+            .cookies_removed = cookies,
+            .udp_payload_size = udp_payload_size,
+        };
 
     std.mem.writeInt(u16, output[record.fields + 8 ..][0..2], @intCast(destination - record.start), .big);
-    return .{ .packet = output[0..destination], .cookies_removed = cookies };
+    return .{
+        .packet = output[0..destination],
+        .cookies_removed = cookies,
+        .udp_payload_size = udp_payload_size,
+    };
 }
 
 fn read16(packet: []const u8, offset: usize) u16 {

@@ -3,6 +3,8 @@ const filtering = @import("../state/filtering.zig");
 const State = @import("../state/state.zig").State;
 const definitions_module = @import("definitions.zig");
 const document_module = @import("document.zig");
+const Record = @import("../domains/record.zig");
+const domain = @import("../domains/domain.zig");
 pub const Definitions = definitions_module.Definitions;
 pub const Document = document_module.Document;
 
@@ -17,10 +19,13 @@ pub const Config = struct {
     log_level: std.log.Level,
     allocator: std.mem.Allocator,
     definitions: Definitions,
+    records: []const Record,
     base_dir: []const u8,
 
     pub fn deinit(self: *Config) void {
         self.definitions.deinit(self.allocator);
+        freeRecords(self.allocator, self.records);
+        self.allocator.free(self.records);
         self.allocator.free(self.base_dir);
         self.allocator.free(self.upstream_addresses);
         self.* = undefined;
@@ -130,6 +135,14 @@ pub fn fromDocument(
         return err;
     };
     errdefer definitions.deinit(allocator);
+    const records = recordsFromDocument(allocator, document, diagnostic) catch |err| {
+        if (diagnostic.len == 0) diagnostic.set("records: {s}", .{@errorName(err)});
+        return err;
+    };
+    errdefer {
+        freeRecords(allocator, records);
+        allocator.free(records);
+    }
     const owned_base_dir = try allocator.dupe(u8, base_dir);
 
     return .{
@@ -140,8 +153,81 @@ pub fn fromDocument(
         .log_level = document.logging.level,
         .allocator = allocator,
         .definitions = definitions,
+        .records = records,
         .base_dir = owned_base_dir,
     };
+}
+
+fn freeRecords(allocator: std.mem.Allocator, records: []const Record) void {
+    for (records) |record| {
+        allocator.free(record.name);
+        switch (record.addresses) {
+            inline else => |addresses| allocator.free(addresses),
+        }
+    }
+}
+
+fn recordsFromDocument(allocator: std.mem.Allocator, document: *const Document, diagnostic: *Diagnostic) ![]const Record {
+    const records = try allocator.alloc(Record, document.records.len);
+    errdefer allocator.free(records);
+    var initialized: usize = 0;
+    errdefer freeRecords(allocator, records[0..initialized]);
+    var names: std.StringHashMapUnmanaged(u2) = .empty;
+    defer names.deinit(allocator);
+    for (document.records, 0..) |record, index| {
+        var name_buffer: [253]u8 = undefined;
+        const normalized = domain.normalize(record.name, &name_buffer) catch
+            return diagnostic.invalid("records[{d}].name: expected an exact DNS name", .{index});
+        if (record.addresses.len == 0 or record.addresses.len > 16)
+            return diagnostic.invalid("records[{d}].addresses: expected 1 to 16 IP literals", .{index});
+        const name = try allocator.dupe(u8, normalized);
+        errdefer allocator.free(name);
+        const entry = try names.getOrPut(allocator, name);
+        const family: u2 = switch (record.type) {
+            .A => 1,
+            .AAAA => 2,
+        };
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        if (entry.value_ptr.* & family != 0)
+            return diagnostic.invalid("records[{d}].name/type: duplicate normalized name and record type", .{index});
+        entry.value_ptr.* |= family;
+        records[index] = .{
+            .name = name,
+            .ttl_seconds = record.ttl,
+            .addresses = switch (record.type) {
+                .A => .{ .a = try recordAddresses(4, allocator, record.addresses, index, diagnostic) },
+                .AAAA => .{ .aaaa = try recordAddresses(16, allocator, record.addresses, index, diagnostic) },
+            },
+        };
+        initialized += 1;
+    }
+    return records;
+}
+
+fn recordAddresses(
+    comptime size: usize,
+    allocator: std.mem.Allocator,
+    literals: []const []const u8,
+    record_index: usize,
+    diagnostic: *Diagnostic,
+) ![]const [size]u8 {
+    var unique: [16][size]u8 = undefined;
+    var count: usize = 0;
+    for (literals, 0..) |literal, index| {
+        const bytes = if (size == 4)
+            (std.Io.net.Ip4Address.parse(literal, 0) catch
+                return diagnostic.invalid("records[{d}].addresses[{d}]: expected an IPv4 literal for A", .{ record_index, index })).bytes
+        else
+            (std.Io.net.Ip6Address.parse(literal, 0) catch
+                return diagnostic.invalid("records[{d}].addresses[{d}]: expected an IPv6 literal for AAAA", .{ record_index, index })).bytes;
+        for (unique[0..count]) |existing| {
+            if (std.mem.eql(u8, &existing, &bytes)) break;
+        } else {
+            unique[count] = bytes;
+            count += 1;
+        }
+    }
+    return allocator.dupe([size]u8, unique[0..count]);
 }
 
 fn address(text: []const u8, port: u16, path: []const u8, diagnostic: *Diagnostic) !std.Io.net.IpAddress {
@@ -171,6 +257,7 @@ test "minimal configuration applies every optional default" {
     try std.testing.expectEqual(@as(u32, 3000), config.upstream_timeout_ms);
     try std.testing.expectEqual(@as(usize, 4096), config.cache_capacity);
     try std.testing.expectEqual(std.log.Level.info, config.log_level);
+    try std.testing.expectEqual(@as(usize, 0), config.records.len);
 }
 
 test "explicit configuration owns addresses and preserves upstream order" {
@@ -213,7 +300,6 @@ test "required fields and schema version are validated" {
 
 test "unknown fields are rejected at every schema level" {
     const cases = [_][]const u8{
-        "{\"schema_version\":1,\"records\":[]}",
         "{\"schema_version\":1,\"dns\":{\"typo\":true}}",
         "{\"schema_version\":1,\"dns\":{\"listen\":{\"host\":\"localhost\"}}}",
         "{\"schema_version\":1,\"upstream\":{\"retry\":true}}",
@@ -582,4 +668,159 @@ test "strict token checks recognize escaped field names and reject byte arrays f
     try expectInvalid(prefix ++ "\"blocks\":{\"domains\":[[97,46,98]]}}");
     try expectInvalid(prefix ++ "\"blocks\":{\"lists\":[{\"id\":[97],\"source\":{\"kind\":\"file\",\"value\":\"missing\"},\"format\":\"domains\"}]}}");
     try expectInvalid(prefix ++ "\"blocks\":{\"lists\":[{\"id\":\"off\",\"source\":{\"kind\":\"file\",\"value\":[97]},\"format\":\"domains\"}]}}");
+}
+
+const records_json =
+    \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+    \\"records":[
+    \\ {"name":"Home.TEST.","type":"A","addresses":["192.0.2.2","192.0.2.1","192.0.2.2"]},
+    \\ {"name":"HOME.test","type":"AAAA","ttl":0,"addresses":["2001:db8::2","2001:0db8:0:0:0:0:0:2","::1","2001:db8::1"]},
+    \\ {"name":"_Service.Test.","type":"A","ttl":4294967295,"addresses":["127.0.0.1"]}
+    \\]}
+;
+
+test "records own normalized names and binary addresses with stable deduplication" {
+    const input = try std.testing.allocator.dupe(u8, records_json);
+    defer std.testing.allocator.free(input);
+    var diagnostic: Diagnostic = .{};
+    var config = try parse(std.testing.allocator, input, ".", &diagnostic);
+    defer config.deinit();
+    @memset(input, 0);
+    try std.testing.expectEqual(@as(usize, 3), config.records.len);
+    const a = config.records[0];
+    try std.testing.expectEqualStrings("home.test", a.name);
+    try std.testing.expectEqual(@as(u32, 60), a.ttl_seconds);
+    try std.testing.expectEqualSlices([4]u8, &.{ .{ 192, 0, 2, 2 }, .{ 192, 0, 2, 1 } }, a.addresses.a);
+    const aaaa = config.records[1];
+    try std.testing.expectEqualStrings("home.test", aaaa.name);
+    try std.testing.expectEqual(@as(u32, 0), aaaa.ttl_seconds);
+    try std.testing.expectEqual(@as(usize, 3), aaaa.addresses.aaaa.len);
+    for ([_][]const u8{ "2001:db8::2", "::1", "2001:db8::1" }, aaaa.addresses.aaaa) |text, actual| {
+        try std.testing.expectEqual((try std.Io.net.Ip6Address.parse(text, 0)).bytes, actual);
+    }
+    try std.testing.expectEqualStrings("_service.test", config.records[2].name);
+    try std.testing.expectEqual(std.math.maxInt(u32), config.records[2].ttl_seconds);
+}
+
+test "constructed records are copied independently from editable buffers" {
+    var name = "Host.TEST.".*;
+    var literal = "192.0.2.1".*;
+    var literals = [_][]const u8{&literal};
+    var document: Document = .{
+        .schema_version = 1,
+        .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
+        .records = &.{.{ .name = &name, .type = .A, .addresses = &literals }},
+    };
+    var diagnostic: Diagnostic = .{};
+    var config = try fromDocument(std.testing.allocator, &document, ".", &diagnostic);
+    defer config.deinit();
+    @memset(&name, 'x');
+    @memset(&literal, '0');
+    literals[0] = "203.0.113.1";
+    document.records = &.{};
+    try std.testing.expectEqualStrings("host.test", config.records[0].name);
+    try std.testing.expectEqual([4]u8{ 192, 0, 2, 1 }, config.records[0].addresses.a[0]);
+}
+
+fn expectInvalidRecords(document: *const Document, field: []const u8) !void {
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, document, ".", &diagnostic));
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), field) != null);
+    const serialized = try std.json.Stringify.valueAlloc(std.testing.allocator, document.*, .{});
+    defer std.testing.allocator.free(serialized);
+    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, serialized, ".", &diagnostic));
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), field) != null);
+}
+
+test "parsed and constructed records reject invalid names and wrong address families" {
+    var document: Document = .{
+        .schema_version = 1,
+        .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
+    };
+    for ([_][]const u8{ "", ".", "*.test", "a..test", "-a.test", "127.0.0.1", "caf\xc3\xa9.test" }) |name| {
+        document.records = &.{.{ .name = name, .type = .A, .addresses = &.{"192.0.2.1"} }};
+        try expectInvalidRecords(&document, "records[0].name");
+    }
+    for ([_][]const u8{ "::1", "localhost", "1.2.3", "256.1.1.1", "01.2.3.4", "192.0.2.1:53", " 192.0.2.1", "" }) |literal| {
+        document.records = &.{
+            .{ .name = "valid.test", .type = .A, .addresses = &.{"192.0.2.1"} },
+            .{ .name = "invalid.test", .type = .A, .addresses = &.{ "192.0.2.2", literal } },
+        };
+        try expectInvalidRecords(&document, "records[1].addresses[1]");
+    }
+    for ([_][]const u8{ "192.0.2.1", "localhost", "[::1]", "fe80::1%eth0", "fe80::1%1", "2001:db8:::1", "" }) |literal| {
+        document.records = &.{.{ .name = "invalid.test", .type = .AAAA, .addresses = &.{literal} }};
+        try expectInvalidRecords(&document, "records[0].addresses[0]");
+    }
+}
+
+test "records enforce input address count before deduplication" {
+    var document: Document = .{
+        .schema_version = 1,
+        .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
+        .records = &.{.{ .name = "host.test", .type = .A, .addresses = &.{} }},
+    };
+    try expectInvalidRecords(&document, "records[0].addresses");
+    const literals = [_][]const u8{"192.0.2.1"} ** 17;
+    document.records = &.{.{ .name = "host.test", .type = .A, .addresses = literals[0..16] }};
+    var diagnostic: Diagnostic = .{};
+    var config = try fromDocument(std.testing.allocator, &document, ".", &diagnostic);
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 1), config.records[0].addresses.a.len);
+    document.records = &.{.{ .name = "host.test", .type = .A, .addresses = &literals }};
+    try expectInvalidRecords(&document, "records[0].addresses");
+    document.records = &.{};
+    var empty = try fromDocument(std.testing.allocator, &document, ".", &diagnostic);
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.records.len);
+}
+
+test "duplicate normalized record names reject only matching families" {
+    var document: Document = .{
+        .schema_version = 1,
+        .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
+        .records = &.{
+            .{ .name = "Host.Test.", .type = .A, .addresses = &.{"192.0.2.1"} },
+            .{ .name = "host.test", .type = .A, .ttl = 30, .addresses = &.{"192.0.2.2"} },
+        },
+    };
+    try expectInvalidRecords(&document, "records[1].name/type");
+    document.records = &.{
+        .{ .name = "Host.Test.", .type = .AAAA, .addresses = &.{"::1"} },
+        .{ .name = "host.test", .type = .AAAA, .addresses = &.{"::2"} },
+    };
+    try expectInvalidRecords(&document, "records[1].name/type");
+}
+
+test "records require strict JSON field shapes and supported record types" {
+    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"records\":";
+    const values = [_][]const u8{
+        "null",                                                                               "{}",                                                                      "[null]",                                                                      "[{}]",
+        "[{\"type\":\"A\",\"addresses\":[\"192.0.2.1\"]}]",                                   "[{\"name\":\"host.test\",\"addresses\":[\"192.0.2.1\"]}]",                "[{\"name\":\"host.test\",\"type\":\"A\"}]",                                   "[{\"name\":3,\"type\":\"A\",\"addresses\":[\"192.0.2.1\"]}]",
+        "[{\"name\":[104],\"type\":\"A\",\"addresses\":[\"192.0.2.1\"]}]",                    "[{\"name\":\"host.test\",\"type\":\"a\",\"addresses\":[\"192.0.2.1\"]}]", "[{\"name\":\"host.test\",\"type\":\"CNAME\",\"addresses\":[\"192.0.2.1\"]}]", "[{\"name\":\"host.test\",\"type\":1,\"addresses\":[\"192.0.2.1\"]}]",
+        "[{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":\"192.0.2.1\"}]",              "[{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":[[192,0,2,1]]}]",   "[{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":[1]}]",                 "[{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":[null]}]",
+        "[{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":[\"192.0.2.1\"],\"typo\":0}]",
+    };
+    for (values) |value| {
+        const input = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, value, "}" });
+        defer std.testing.allocator.free(input);
+        try expectInvalid(input);
+    }
+    for ([_][]const u8{ "-1", "4294967296", "\"60\"", "60.0", "6e1", "true", "null", "[]", "{}" }) |ttl| {
+        const input = try std.fmt.allocPrint(std.testing.allocator, "{s}[{{\"name\":\"host.test\",\"type\":\"A\",\"addresses\":[\"192.0.2.1\"],\"ttl\":{s}}}]}}", .{ prefix, ttl });
+        defer std.testing.allocator.free(input);
+        try expectInvalid(input);
+    }
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, prefix ++ "[{\"name\":\"host.test\",\"type\":\"A\",\"type\":\"AAAA\",\"addresses\":[\"::1\"]}]}", ".", &diagnostic));
+}
+
+fn parseRecordsWithFailingAllocator(allocator: std.mem.Allocator) !void {
+    var diagnostic: Diagnostic = .{};
+    var config = try parse(allocator, records_json, ".", &diagnostic);
+    defer config.deinit();
+}
+
+test "records release all partial allocations on failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseRecordsWithFailingAllocator, .{});
 }

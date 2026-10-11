@@ -29,6 +29,7 @@ are required. Optional sections and fields use the following defaults:
 | `upstream.timeout_ms` | `3000` | Integer, 1–4294967295 |
 | `cache.capacity` | `4096` | Nonnegative integer fitting `usize`; zero disables caching |
 | `logging.level` | `"info"` | `"err"`, `"warn"`, `"info"`, `"debug"` |
+| `records` | `[]` | Local IN A/AAAA record sets; see below |
 
 Capacity counts cache slots, not bytes; large values still depend on available
 memory. Hostnames and IPv6 transport addresses are not supported. Binding beyond
@@ -118,7 +119,52 @@ import or bind. The previous DNS configuration remains active if recovery
 succeeds, but the saved file remains the authority for the next reload/startup.
 Coordinate external editors with application saves to avoid last-writer-wins
 overwrites. This configuration editor does not add persistent API/peer CRUD.
-The hard-coded `home.test` A/AAAA example is not configurable through this file.
+Custom local records are owned by each generation's configuration and replaced
+on successful reload, including removal of entries absent from the new file.
+
+### Custom DNS records
+
+The optional top-level `records` array contains one entry per name and type:
+
+```json
+"records": [
+  {
+    "name": "home.test",
+    "type": "A",
+    "ttl": 60,
+    "addresses": ["192.0.2.10", "192.0.2.11"]
+  },
+  {
+    "name": "home.test",
+    "type": "AAAA",
+    "ttl": 60,
+    "addresses": ["2001:db8::10", "2001:db8::11"]
+  }
+]
+```
+
+`name`, `type`, and `addresses` are required. Names use the exact-name
+normalization rules below; types must be `"A"` or `"AAAA"`. Each entry accepts
+1–16 IP literals of its declared family. Binary duplicate addresses are removed,
+preserving first occurrence. Duplicate normalized name/type pairs are rejected,
+even when their TTLs agree. `ttl` defaults to 60 seconds and accepts unsigned
+32-bit integers including zero. Invalid entries reject the entire configuration.
+
+An IN query receives every address in the matching set with the shared TTL,
+not a randomly selected address. If the complete set cannot fit the client's
+UDP limit (512 bytes without EDNS, at least 512 with EDNS), the response contains
+only the question and the TC flag; no partial set is returned. Incoming TCP is
+not implemented, so keep sets small enough for clients that cannot receive the
+complete UDP answer. A missing name/type continues through filtering and
+cache/upstream resolution; an A-only entry does not suppress upstream AAAA.
+Explicit blocks still override local records. Generated answers are not cached.
+
+Omitting `records` or using `[]` supplies no local records. There is no implicit
+`home.test`; the example configuration now defines it explicitly.
+The JSON-facing entries are available through `Document.records`.
+`Config.records` owns normalized names and tagged binary address slices
+(`.a: []const [4]u8` or `.aaaa: []const [16]u8`) with `ttl_seconds`.
+All parsing and allocation happens during configuration loading, not queries.
 
 ## Domain filtering and blocklists
 

@@ -7,13 +7,14 @@ pub const default_ttl_seconds: u32 = 60;
 
 name: []const u8,
 ttl_seconds: u32 = default_ttl_seconds,
-a: ?[ipv4_address_len]u8 = null,
-aaaa: ?[ipv6_address_len]u8 = null,
+addresses: union(enum) {
+    a: []const [ipv4_address_len]u8,
+    aaaa: []const [ipv6_address_len]u8,
+},
 
-pub fn data(self: *const Record, qtype: RecordType) ?[]const u8 {
-    return switch (qtype) {
-        .a => if (self.a) |*value| value else null,
-        .aaaa => if (self.aaaa) |*value| value else null,
-        else => null,
+pub fn recordType(self: *const Record) RecordType {
+    return switch (self.addresses) {
+        .a => .a,
+        .aaaa => .aaaa,
     };
 }

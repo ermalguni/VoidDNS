@@ -121,6 +121,10 @@ test "manager owns its path and saves valid definitions without source IO" {
             },
         },
         .allows = .{ .domains = &.{"Allowed.Example."} },
+        .records = &.{
+            .{ .name = "Home.TEST.", .type = .A, .ttl = 0, .addresses = &.{ "192.0.2.1", "192.0.2.2", "192.0.2.1" } },
+            .{ .name = "home.test", .type = .AAAA, .addresses = &.{ "2001:db8::1", "2001:0db8:0:0:0:0:0:1", "::1" } },
+        },
     };
     var diagnostic: config.Diagnostic = .{};
     try manager.save(io, &replacement, &diagnostic);
@@ -147,6 +151,21 @@ test "manager owns its path and saves valid definitions without source IO" {
     try std.testing.expect(remote_source.enabled);
     try std.testing.expect(remote_source.source.kind == .url);
     try std.testing.expectEqualStrings("http://127.0.0.1:1/list", remote_source.source.value);
+    try std.testing.expectEqual(@as(usize, 2), loaded.records.len);
+    try std.testing.expectEqualStrings("home.test", loaded.records[0].name);
+    try std.testing.expectEqual(@as(u32, 0), loaded.records[0].ttl_seconds);
+    try std.testing.expectEqual(@as(usize, 2), loaded.records[0].addresses.a.len);
+    try std.testing.expectEqual([4]u8{ 192, 0, 2, 1 }, loaded.records[0].addresses.a[0]);
+    try std.testing.expectEqual([4]u8{ 192, 0, 2, 2 }, loaded.records[0].addresses.a[1]);
+    try std.testing.expectEqual(@as(u32, 60), loaded.records[1].ttl_seconds);
+    try std.testing.expectEqual(@as(usize, 2), loaded.records[1].addresses.aaaa.len);
+    try std.testing.expectEqual((try std.Io.net.Ip6Address.parse("2001:db8::1", 0)).bytes, loaded.records[1].addresses.aaaa[0]);
+    try std.testing.expectEqual((try std.Io.net.Ip6Address.parse("::1", 0)).bytes, loaded.records[1].addresses.aaaa[1]);
+    const saved = try tmp.dir.readFileAlloc(io, "config.json", allocator, .limited(config.max_file_size));
+    defer allocator.free(saved);
+    const decoded = try document.parse(allocator, saved, &diagnostic);
+    defer decoded.deinit();
+    try std.testing.expectEqualDeep(replacement.records, decoded.value.records);
     if (@hasDecl(std.Io.File.Permissions, "toMode")) {
         const stat = try tmp.dir.statFile(io, "config.json", .{});
         try std.testing.expectEqual(@as(std.posix.mode_t, 0), stat.permissions.toMode() & 0o077);
@@ -205,6 +224,19 @@ test "invalid saves preserve original bytes and create no temporary files" {
     invalid = minimal_document;
     invalid.allows.domains = &.{"*.test"};
     try std.testing.expectError(error.InvalidDomain, manager.save(io, &invalid, &diagnostic));
+    try expectContents(tmp.dir, "config.json", minimal_json);
+    invalid = minimal_document;
+    invalid.records = &.{.{ .name = "host.test", .type = .A, .addresses = &.{} }};
+    try std.testing.expectError(error.InvalidConfig, manager.save(io, &invalid, &diagnostic));
+    try expectContents(tmp.dir, "config.json", minimal_json);
+    invalid.records = &.{.{ .name = "host.test", .type = .AAAA, .addresses = &.{"192.0.2.1"} }};
+    try std.testing.expectError(error.InvalidConfig, manager.save(io, &invalid, &diagnostic));
+    try expectContents(tmp.dir, "config.json", minimal_json);
+    invalid.records = &.{
+        .{ .name = "Host.Test.", .type = .A, .addresses = &.{"192.0.2.1"} },
+        .{ .name = "host.test", .type = .A, .addresses = &.{"192.0.2.2"} },
+    };
+    try std.testing.expectError(error.InvalidConfig, manager.save(io, &invalid, &diagnostic));
     try expectContents(tmp.dir, "config.json", minimal_json);
     var iterator = tmp.dir.iterate();
     try std.testing.expectEqualStrings("config.json", (try iterator.next(io)).?.name);

@@ -1,23 +1,11 @@
 const std = @import("std");
 const Config = @import("../config/config.zig").Config;
 const State = @import("../state/state.zig").State;
-const Record = @import("../domains/record.zig");
 const message = @import("../dns/message.zig");
 const Cache = @import("../cache/cache.zig");
 const UpstreamPool = @import("../resolver/upstream.zig").Pool;
 const control = @import("control.zig");
 const udp = @import("udp.zig");
-
-const records = [_]Record{.{
-    .name = "home.test",
-    .a = .{ 192, 0, 2, 10 },
-    .aaaa = .{
-        0x20, 0x01, 0x0d, 0xb8,
-        0,    0,    0,    0,
-        0,    0,    0,    0,
-        0,    0,    0,    0x10,
-    },
-}};
 
 /// Main owns this context at a stable address, along with the borrowed config
 /// and state. stop joins before releasing the listener or any borrowed memory.
@@ -76,7 +64,7 @@ pub const Worker = struct {
     }
 
     fn run(self: *Worker, io: std.Io) anyerror!void {
-        udp.serve(io, &self.listener.?, &records, self.buffer, &self.cache, &self.upstreams, self.state) catch |err| {
+        udp.serve(io, &self.listener.?, self.settings.records, self.buffer, &self.cache, &self.upstreams, self.state) catch |err| {
             if (err != error.Canceled) {
                 self.mailbox.workerFailed(io, .{ .generation = self.generation, .err = err });
             }

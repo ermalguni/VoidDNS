@@ -19,6 +19,20 @@
   "logging": {
     "level": "debug"
   },
+  "records": [
+    {
+      "name": "home.test",
+      "type": "A",
+      "ttl": 60,
+      "addresses": ["192.0.2.10", "192.0.2.11"]
+    },
+    {
+      "name": "home.test",
+      "type": "AAAA",
+      "ttl": 60,
+      "addresses": ["2001:db8::10", "2001:db8::11"]
+    }
+  ],
   "blocks": {
     "lists": [
       {
