@@ -30,7 +30,23 @@ pub const Index = struct {
     pub fn acquire(self: *Index, names: *parse.Names) !Snapshot {
         const snapshot = try self.allocator.alloc([]const u8, names.entries.count());
         errdefer self.allocator.free(snapshot);
-        try self.entries.ensureUnusedCapacity(self.allocator, names.entries.count());
+        try self.reserve(names.entries.count());
+        self.acquireReserved(names, snapshot);
+        return snapshot;
+    }
+
+    /// Reserve a conservative upper bound before publishing any source changes.
+    /// Rehashing on failure is permitted; keys and membership counts are not.
+    pub fn reserve(self: *Index, additional: u32) !void {
+        if (additional == 0) return;
+        const total = std.math.add(u32, self.entries.count(), additional) catch return error.OutOfMemory;
+        try self.entries.ensureTotalCapacity(self.allocator, total);
+    }
+
+    /// Takes ownership of names without allocating. The caller provides the
+    /// snapshot buffer and reserves capacity for every acquisition in the batch.
+    pub fn acquireReserved(self: *Index, names: *parse.Names, snapshot: [][]const u8) void {
+        std.debug.assert(snapshot.len == names.entries.count());
         var keys = names.entries.keyIterator();
         var i: usize = 0;
         while (keys.next()) |key| : (i += 1) {
@@ -44,7 +60,7 @@ pub const Index = struct {
             snapshot[i] = entry.key_ptr.*;
         }
         names.entries.clearRetainingCapacity();
-        return snapshot;
+        // The caller owns snapshot; names now owns only its temporary hash table.
     }
 
     /// Cannot fail. Release the previous snapshot only after acquiring its

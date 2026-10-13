@@ -7,7 +7,7 @@ const log = std.log.scoped(.upstream);
 
 const automatic_port: u16 = 0;
 
-/// Borrows its generation's address list; used by the sequential UDP worker.
+/// Borrows the active configuration's address list; guarded by Worker.mutex.
 pub const Pool = struct {
     addresses: []const net.IpAddress,
     response_timeout: Io.Clock.Duration,

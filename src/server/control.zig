@@ -3,15 +3,17 @@ const std = @import("std");
 pub const max_command_bytes = 4096;
 pub const request_capacity = 16;
 
-/// Save paths own their bytes; the consumer releases them after handling.
+/// Save paths and refresh IDs own their bytes until the consumer releases them.
 pub const Request = union(enum) {
     reload,
+    refresh: []u8,
+    refresh_all,
     save: []u8,
     quit,
 
     pub fn deinit(self: Request, allocator: std.mem.Allocator) void {
         switch (self) {
-            .save => |path| allocator.free(path),
+            .save, .refresh => |text| allocator.free(text),
             else => {},
         }
     }
@@ -139,6 +141,23 @@ pub const Stdin = struct {
         if (text.len == 0) return false;
         if (std.mem.eql(u8, text, "reload")) {
             try self.mailbox.put(io, .reload);
+        } else if (std.mem.eql(u8, text, "refresh-all")) {
+            try self.mailbox.put(io, .refresh_all);
+        } else if (std.mem.startsWith(u8, text, "refresh ")) {
+            const id = std.mem.trim(u8, text[8..], " \t");
+            if (id.len == 0 or id.len > 128) {
+                std.log.warn("control refresh requires a source ID", .{});
+                return false;
+            }
+            for (id) |byte| {
+                if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '_' and byte != '-') {
+                    std.log.warn("control refresh requires a valid source ID", .{});
+                    return false;
+                }
+            }
+            const owned = try self.allocator.dupe(u8, id);
+            errdefer self.allocator.free(owned);
+            try self.mailbox.put(io, .{ .refresh = owned });
         } else if (std.mem.eql(u8, text, "quit")) {
             try self.mailbox.put(io, .quit);
             return true;
@@ -152,7 +171,7 @@ pub const Stdin = struct {
             errdefer self.allocator.free(owned);
             try self.mailbox.put(io, .{ .save = owned });
         } else {
-            std.log.warn("unknown control command; expected reload, save <candidate-file>, or quit", .{});
+            std.log.warn("unknown control command; expected reload, refresh <source-id>, refresh-all, save <candidate-file>, or quit", .{});
         }
         return false;
     }
@@ -179,4 +198,19 @@ test "queued save path owns bytes independently of command buffer" {
     const notification = try mailbox.receive(std.testing.io);
     defer notification.request.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("candidate.json", notification.request.save);
+}
+
+test "refresh ID survives command buffer reuse and malformed IDs are not queued" {
+    var mailbox: Mailbox = .{};
+    defer mailbox.deinit(std.testing.allocator);
+    var producer: Stdin = .{ .allocator = std.testing.allocator, .mailbox = &mailbox };
+    var line = "refresh source-1".*;
+    try std.testing.expect(!try producer.command(std.testing.io, &line));
+    @memset(&line, 'x');
+    const notification = try mailbox.receive(std.testing.io);
+    defer notification.request.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("source-1", notification.request.refresh);
+    try std.testing.expect(!try producer.command(std.testing.io, "refresh bad id"));
+    try std.testing.expect(!try producer.command(std.testing.io, "refresh "));
+    try std.testing.expectEqual(@as(usize, 0), mailbox.count);
 }

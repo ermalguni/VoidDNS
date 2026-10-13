@@ -65,11 +65,11 @@ Loading and saving validate definitions without fetching lists.
 `Config.prepareState` separately builds independent RAM filtering state.
 Colocated configuration tests run through `zig build test`.
 
-`main.zig` owns one manager and coordinates DNS generations. Each generation
-keeps its configuration, filtering state, upstream pool, cache, and packet buffer
-alive until its worker has stopped. The DNS loop uses a concurrent task on Zig
-0.16's threaded I/O backend; cancellation wakes blocked I/O and joins the worker
-before resources are released. No thread is forcibly terminated.
+`main.zig` owns one manager, the active configuration, managed RAM state, and a
+long-lived DNS worker. Configuration snapshots and worker resources have separate
+lifetimes. The DNS loop uses a concurrent task on Zig 0.16's threaded I/O backend;
+cancellation wakes blocked I/O and joins the worker before shutdown or listener
+replacement. No thread is forcibly terminated.
 
 ### Saving and reloading
 
@@ -83,7 +83,9 @@ Enter one command per line:
 
 | Command | Behavior |
 | --- | --- |
-| `reload` | Read the configured file and prepare a replacement DNS generation |
+| `reload` | Validate the configured file and atomically apply its semantic differences |
+| `refresh <source-id>` | Reload the contents of one currently active source definition |
+| `refresh-all` | Reload all enabled source contents in one transaction |
 | `save <candidate-file>` | Parse and validate a typed document, serialize and atomically save it to the configured path, then request reload |
 | `quit` | Cooperatively stop and join the DNS worker, then exit |
 
@@ -94,15 +96,52 @@ bytes; candidate files remain limited to 1 MiB. Paths after `save` are literal,
 not shell-expanded. Relative list paths inside a candidate resolve against the
 **target configuration directory**, not the candidate file's directory.
 
-Main alone handles save/reload requests through a bounded synchronized mailbox.
-It prepares definitions, source snapshots, cache, and buffers while the old worker
-continues serving. Invalid JSON, invalid definitions, or failed imports leave the
-old worker untouched. Once preparation succeeds, main cancels and joins the old
-worker, then binds and starts the replacement. This introduces a short serving
-gap and resets the cache. Preparation temporarily holds both generations in RAM.
-If replacement startup fails, main attempts to restart the retained previous
-generation without refetching its lists; failed recovery exits with an error.
-Source fetching can delay processing later control requests.
+Main alone handles save/reload/refresh requests through a bounded synchronized
+mailbox. Reload validates the entire document, then compares normalized records,
+explicit rules, and source definitions with the last successfully applied state.
+Whitespace, equivalent domain spelling, and record/source collection order do not
+trigger changes. RRset address order remains significant because it controls
+answer order. A semantically unchanged reload is a no-op.
+
+| Change | Runtime work |
+| --- | --- |
+| Record added, removed, addresses/TTL changed | Publish the new record collection, retaining unchanged name/address allocations |
+| Explicit allow/block changed | Add/remove only affected normalized names |
+| Enabled source added or enabled | Load only that source and add its memberships |
+| Source removed or disabled | Release only its memberships; disabling retains the definition, not its contents |
+| Enabled source URL/path/format changed | Prepare and replace only that source's snapshot |
+| Source display name changed | Update metadata without source I/O |
+| Log level changed | Update the atomic threshold |
+| Upstream timeout changed | Update the pool timeout at a query boundary, retaining cache and rotation |
+| Upstream servers changed | Replace the pool and clear the upstream response cache |
+| Cache capacity changed | Replace only the cache; zero disables it |
+| Listener address/port changed | Cancel/join and rebind the worker, retaining unchanged resources |
+
+**Reload is not refresh.** An unchanged file path or URL retains its last imported
+snapshot even if its contents changed or the source is now unavailable. Use
+`refresh <source-id>` or `refresh-all` to import new contents. These commands use
+the active definitions, not unapplied edits in the configuration file. Refreshing
+a disabled source is a no-op; an unknown source ID is rejected. Refresh-all is
+all-or-nothing across enabled sources. Restart still loads every enabled source.
+
+Fetching, parsing, and staging happen while DNS continues serving. Every
+fallible reservation completes before publication; any invalid configuration,
+failed import, or allocation failure rejects the whole candidate. Main commits
+the prepared source/rule/record changes under the state publication mutex. DNS
+holds that mutex only through policy lookup and local-answer construction, never
+through cache/upstream I/O. A query already past its policy check may finish with
+the preceding policy. Large source commits still take time proportional to their
+changed memberships and can briefly delay policy lookups.
+
+Record/filtering-only changes preserve the listener, worker generation, and
+response cache. Local answers and policy precede cache lookup; deleting a local
+record may expose a still-valid upstream cache entry. Runtime pool/cache changes
+wait for the current resolution to finish. Listener changes alone require a
+serving gap: if replacement startup fails, main restores the previous listener
+without publishing any candidate changes or discarding its cache. Failed listener
+recovery exits with an error. Preparation retains old data plus staged changes,
+not a second copy of every imported list. Source fetching can delay processing
+later control requests.
 
 Saving writes an exclusive temporary file in the target directory, syncs its
 contents, atomically replaces the target, and syncs the directory on supported
@@ -119,8 +158,9 @@ import or bind. The previous DNS configuration remains active if recovery
 succeeds, but the saved file remains the authority for the next reload/startup.
 Coordinate external editors with application saves to avoid last-writer-wins
 overwrites. This configuration editor does not add persistent API/peer CRUD.
-Custom local records are owned by each generation's configuration and replaced
-on successful reload, including removal of entries absent from the new file.
+The configuration remains authoritative: records/rules/source definitions absent
+from a successful candidate are removed. Records are identified by normalized
+name/type, rules by normalized name/action, and sources by their stable ID.
 
 ### Custom DNS records
 
@@ -276,24 +316,27 @@ the policy checks.
 All enabled lists must load successfully **before binding the listener**. Missing
 files, failed downloads, malformed content, or invalid definitions stop startup.
 Definitions survive restarts in the configuration file; downloaded snapshots do not.
-Each restart or reload fetches the configured sources, so offline activation
-requires locally available sources. No management HTTP endpoints, automatic
-refresh scheduler, file watcher, or peer synchronization are implemented.
+Each restart fetches every enabled source. Reload retains unchanged snapshots,
+so unrelated record edits work even when an existing source is unavailable.
+No management HTTP endpoints, automatic refresh scheduler, file watcher, or peer
+synchronization are implemented.
 
 The in-process blocklist service supports add, replace, refresh, and remove.
 Failed replacements/refreshes retain the previous complete snapshot. Source
 membership is preserved: deleting or refreshing one source cannot remove a name
 still provided by another. Explicit blocks remain independent of imported names.
-These mutation operations require exclusive access. Each DNS worker reads its
-own fully prepared state; main joins it before reclaiming that state. Reload
-preparation never mutates the active generation's indexes.
+Mutation commits require the publication mutex. Main is the sole writer and
+prepares source contents outside that mutex; it never changes live memberships
+until all participating plans have reserved capacity successfully. Queries cannot
+borrow managed strings or records beyond their guarded answer construction.
 
 - `domains/domain.zig` and `domains/store.zig`: normalization and explicit sets.
 - `blocklist/source.zig`, `fetch.zig`, `parse.zig`: definitions and bounded import.
 - `blocklist/index.zig`: RAM hash index with one interned name per unique domain,
   membership counts, and per-source slices referencing those names.
 - `blocklist/service.zig`: owned source lifecycle and transactional replacement.
-- `state/state.zig`, `state/filtering.zig`: state ownership and construction from typed configuration definitions.
+- `state/state.zig`, `state/filtering.zig`: state ownership and startup construction.
+- `state/apply.zig`: prepared source/rule/record diffs and atomic publication.
 - `policy/policy.zig`: precedence; `resolver/resolver.zig`: response construction
   and policy-before-cache dispatch.
 

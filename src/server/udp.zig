@@ -1,5 +1,4 @@
 const std = @import("std");
-const Record = @import("../domains/record.zig");
 const message = @import("../dns/message.zig");
 const decode = @import("../dns/decode.zig");
 const resolver = @import("../resolver/resolver.zig");
@@ -13,11 +12,11 @@ const log = std.log.scoped(.server);
 pub fn serve(
     io: std.Io,
     listener: *const std.Io.net.Socket,
-    records: []const Record,
     buffer: []u8,
     cache: *Cache,
     upstreams: *UpstreamPool,
-    state: *const State,
+    state: *State,
+    runtime_mutex: *std.Io.Mutex,
 ) !void {
     while (true) {
         const query = try listener.receive(io, buffer);
@@ -28,20 +27,23 @@ pub fn serve(
         logQuery(query.from, query.data);
         const query_id = decode.id(query.data);
 
-        const response = resolver.resolve(
-            io,
-            query.data,
-            buffer,
-            records,
-            cache,
-            upstreams,
-            state,
-        ) catch |err| {
-            if (err == error.Canceled) return err;
-            log.warn("resolution failed client={f} id={d}: {s}", .{
-                query.from, query_id, @errorName(err),
-            });
-            continue;
+        const response = resolved: {
+            try runtime_mutex.lock(io);
+            defer runtime_mutex.unlock(io);
+            break :resolved resolver.resolve(
+                io,
+                query.data,
+                buffer,
+                cache,
+                upstreams,
+                state,
+            ) catch |err| {
+                if (err == error.Canceled) return err;
+                log.warn("resolution failed client={f} id={d}: {s}", .{
+                    query.from, query_id, @errorName(err),
+                });
+                continue;
+            };
         };
 
         listener.send(io, &query.from, response) catch |err| {

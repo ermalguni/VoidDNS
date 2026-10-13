@@ -6,15 +6,17 @@ const State = @import("state/state.zig").State;
 const Worker = @import("server/server.zig").Worker;
 const control = @import("server/control.zig");
 const logging = @import("logging.zig");
+const Apply = @import("state/apply.zig").Plan;
+const Service = @import("blocklist/service.zig").Service;
 
-// Keep all levels compiled in; main selects the threshold between workers.
+// Keep all levels compiled in; configuration publication selects the threshold.
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .logFn = logging.logFn,
 };
 
 const usage = "Usage: VoidDNS --config <path> [--control-stdin]\n" ++
-    "  --control-stdin: read reload, save <candidate-file>, quit; EOF quits\n";
+    "  --control-stdin: reload, refresh <source-id>, refresh-all, save <candidate-file>, quit; EOF quits\n";
 const max_candidate_bytes = config.max_file_size;
 
 const Arguments = struct {
@@ -40,9 +42,9 @@ const Arguments = struct {
     }
 };
 
-/// Heap allocation keeps every borrowed config/state/worker address stable
-/// across publication. Main alone owns and destroys these generations.
-const Generation = struct {
+/// Stable owner of independently lived configuration, managed state, and worker.
+/// Main alone serializes writers; queries borrow only guarded published data.
+const Application = struct {
     settings: config.Config,
     state: State,
     worker: Worker,
@@ -53,18 +55,19 @@ const Generation = struct {
         manager: *Manager,
         mailbox: *control.Mailbox,
         diagnostic: *config.Diagnostic,
-    ) !*Generation {
-        const self = try allocator.create(Generation);
+    ) !*Application {
+        const self = try allocator.create(Application);
         errdefer allocator.destroy(self);
         self.settings = try manager.load(io, diagnostic);
         errdefer self.settings.deinit();
         self.state = try self.settings.prepareState(io, diagnostic);
         errdefer self.state.deinit();
+        self.state.records = self.settings.records;
         self.worker = try Worker.init(allocator, &self.settings, &self.state, mailbox);
         return self;
     }
 
-    fn destroy(self: *Generation, allocator: std.mem.Allocator, io: std.Io) void {
+    fn destroy(self: *Application, allocator: std.mem.Allocator, io: std.Io) void {
         self.worker.deinit(io);
         self.state.deinit();
         self.settings.deinit();
@@ -95,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     var mailbox: control.Mailbox = .{};
     defer mailbox.deinit(allocator);
     var diagnostic: config.Diagnostic = .{};
-    var active = Generation.prepare(allocator, io, &manager, &mailbox, &diagnostic) catch |err| {
+    const active = Application.prepare(allocator, io, &manager, &mailbox, &diagnostic) catch |err| {
         std.log.err("configuration '{s}': {s} ({s})", .{
             options.path, diagnostic.text(), @errorName(err),
         });
@@ -136,12 +139,14 @@ pub fn main(init: std.process.Init) !void {
                 defer request.deinit(allocator);
                 switch (request) {
                     .quit => return,
-                    .reload => try reload(allocator, io, &manager, &mailbox, &active, &next_generation),
+                    .reload => try reload(allocator, io, &manager, active, &next_generation),
+                    .refresh => |id| try refresh(io, active, .{ .one = id }),
+                    .refresh_all => try refresh(io, active, .all),
                     .save => |path| {
                         if (saveCandidate(allocator, io, &manager, path)) {
                             // Dispatch the reload notification directly: main
                             // must not enqueue into its own potentially full queue.
-                            try reload(allocator, io, &manager, &mailbox, &active, &next_generation);
+                            try reload(allocator, io, &manager, active, &next_generation);
                         }
                     },
                 }
@@ -150,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn start(generation: *Generation, io: std.Io, next_generation: *u64) !void {
+fn start(generation: *Application, io: std.Io, next_generation: *u64) !void {
     const id = next_generation.*;
     next_generation.* +%= 1;
     try generation.worker.start(io, id);
@@ -160,40 +165,103 @@ fn reload(
     allocator: std.mem.Allocator,
     io: std.Io,
     manager: *Manager,
-    mailbox: *control.Mailbox,
-    active: **Generation,
+    active: *Application,
     next_generation: *u64,
 ) !void {
     var diagnostic: config.Diagnostic = .{};
-    // Validation, source fetches, RAM indexes, cache, and buffers are prepared
-    // while the current worker still serves its immutable snapshot.
-    const candidate = Generation.prepare(allocator, io, manager, mailbox, &diagnostic) catch |err| {
-        std.log.err("reload rejected; current DNS worker remains active: {s} ({s})", .{
+    var candidate = manager.load(io, &diagnostic) catch |err| {
+        std.log.err("reload rejected; active configuration unchanged: {s} ({s})", .{
             diagnostic.text(), @errorName(err),
         });
         return;
     };
-    var published = false;
-    defer if (!published) candidate.destroy(allocator, io);
-
-    const previous = active.*;
-    previous.worker.stop(io);
-    logging.setLevel(candidate.settings.log_level);
-    start(candidate, io, next_generation) catch |err| {
-        std.log.err("reload start failed: {s}; restoring previous generation", .{@errorName(err)});
-        logging.setLevel(previous.settings.log_level);
-        start(previous, io, next_generation) catch |rollback_err| {
-            std.log.err("reload rollback failed: {s}", .{@errorName(rollback_err)});
-            return rollback_err;
-        };
-        std.log.warn("reload rejected; previous DNS configuration restored", .{});
+    // After publication candidate owns the preceding configuration instead.
+    defer candidate.deinit();
+    var plan = Apply.prepare(allocator, io, &active.state, &active.settings, &candidate) catch |err| {
+        std.log.err("reload preparation failed; active configuration unchanged: {s}", .{@errorName(err)});
         return;
     };
+    defer plan.deinit();
+    var runtime = Worker.Update.prepare(allocator, &active.settings, &candidate) catch |err| {
+        std.log.err("reload resource preparation failed; active configuration unchanged: {s}", .{@errorName(err)});
+        return;
+    };
+    defer runtime.deinit();
+    const listener_changed = !active.settings.listen_address.eql(&candidate.listen_address);
+    if (!plan.changed() and !runtime.needsLock() and !listener_changed and active.settings.log_level == candidate.log_level) {
+        std.log.info("reload unchanged generation={d}", .{active.worker.generation});
+        return;
+    }
 
-    active.* = candidate;
-    published = true;
-    previous.destroy(allocator, io);
-    std.log.info("reload complete generation={d}", .{candidate.worker.generation});
+    // All fallible reservations precede any listener change or logical mutation.
+    // Only main writes; capacities remain valid after releasing this guard.
+    reserve(io, &active.state, &plan) catch |err| {
+        std.log.err("reload reservation failed; active configuration unchanged: {s}", .{@errorName(err)});
+        return;
+    };
+    if (listener_changed) active.worker.stop(io);
+    const lock_runtime = listener_changed or runtime.needsLock();
+    if (lock_runtime) active.worker.mutex.lockUncancelable(io);
+    defer if (lock_runtime) active.worker.mutex.unlock(io);
+    active.state.mutex.lockUncancelable(io);
+    defer active.state.mutex.unlock(io);
+
+    if (listener_changed) {
+        active.worker.listen_address = candidate.listen_address;
+        // A new worker cannot resolve until this transaction releases its
+        // runtime guard. A failed bind/start publishes none of the candidate.
+        start(active, io, next_generation) catch |err| {
+            std.log.err("reload listener start failed: {s}; restoring previous listener", .{@errorName(err)});
+            active.worker.listen_address = active.settings.listen_address;
+            start(active, io, next_generation) catch |rollback_err| {
+                std.log.err("reload listener rollback failed: {s}", .{@errorName(rollback_err)});
+                return rollback_err;
+            };
+            std.log.warn("reload rejected; previous configuration restored", .{});
+            return;
+        };
+    }
+
+    plan.commit(&active.state, &active.settings, &candidate);
+    if (!runtime.upstreams_changed) {
+        // The running pool borrows this allocation, not the Config field itself.
+        std.mem.swap([]const std.Io.net.IpAddress, &active.settings.upstream_addresses, &candidate.upstream_addresses);
+    }
+    if (runtime.needsLock()) runtime.commit(&active.worker);
+    std.mem.swap(config.Config, &active.settings, &candidate);
+    logging.setLevel(active.settings.log_level);
+    std.log.info("reload complete generation={d}", .{active.worker.generation});
+}
+
+fn reserve(io: std.Io, state: *State, plan: *Apply) !void {
+    try state.mutex.lock(io);
+    defer state.mutex.unlock(io);
+    try plan.reserve(state);
+}
+
+fn refresh(io: std.Io, active: *Application, selection: Service.Refresh) !void {
+    var plan = active.state.lists.prepare(
+        io,
+        active.settings.definitions.sources.items,
+        active.settings.base_dir,
+        selection,
+    ) catch |err| {
+        std.log.err("refresh rejected; imported snapshots unchanged: {s}", .{@errorName(err)});
+        return;
+    };
+    defer plan.deinit();
+    if (!plan.changed()) {
+        std.log.info("refresh unchanged", .{});
+        return;
+    }
+    try active.state.mutex.lock(io);
+    defer active.state.mutex.unlock(io);
+    plan.reserve(&active.state.lists) catch |err| {
+        std.log.err("refresh reservation failed; imported snapshots unchanged: {s}", .{@errorName(err)});
+        return;
+    };
+    plan.commit(&active.state.lists);
+    std.log.info("refresh complete generation={d}", .{active.worker.generation});
 }
 
 fn saveCandidate(allocator: std.mem.Allocator, io: std.Io, manager: *Manager, path: []const u8) bool {

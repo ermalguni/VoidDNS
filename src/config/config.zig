@@ -31,8 +31,9 @@ pub const Config = struct {
         self.* = undefined;
     }
 
-    /// Materialize enabled sources only when preparing a runtime generation.
-    /// The returned state is independently owned and must be deinitialized.
+    /// Materialize enabled sources for startup, not incremental reload.
+    /// The returned filtering state is independently owned; records are attached
+    /// separately by main as a guarded borrow from the active configuration.
     pub fn prepareState(self: *const Config, io: std.Io, diagnostic: *Diagnostic) !State {
         diagnostic.* = .{};
         return filtering.build(self.allocator, io, &self.definitions, self.base_dir) catch |err| {

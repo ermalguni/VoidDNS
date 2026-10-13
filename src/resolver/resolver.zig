@@ -16,10 +16,9 @@ pub fn resolve(
     io: std.Io,
     query: []const u8,
     buffer: []u8,
-    records: []const Record,
     cache: *Cache,
     upstreams: *UpstreamPool,
-    state: *const State,
+    state: *State,
 ) ![]const u8 {
     const normalized = try edns.stripCookies(query, buffer);
     const request = normalized.packet;
@@ -30,8 +29,12 @@ pub fn resolve(
     }
     // Snapshot all request metadata before an aliased response overwrites it.
     const response_buffer = buffer[0..@min(buffer.len, normalized.udp_payload_size)];
-    if (try managedAnswer(request, response_buffer, records, state)) |response|
-        return response;
+    {
+        try state.mutex.lock(io);
+        defer state.mutex.unlock(io);
+        if (try managedAnswer(request, response_buffer, state)) |response|
+            return response;
+    }
 
     if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit|
         return hit;
@@ -67,7 +70,6 @@ pub fn resolve(
 fn managedAnswer(
     query: []const u8,
     buffer: []u8,
-    records: []const Record,
     state: *const State,
 ) !?[]const u8 {
     const question = try decode.question(query);
@@ -76,7 +78,7 @@ fn managedAnswer(
 
     var local: ?*const Record = null;
     if (question.qclass == .internet) {
-        for (records) |*record| {
+        for (state.records) |*record| {
             if (record.recordType() == question.qtype and question.name.matches(record.name)) {
                 local = record;
                 break;
@@ -131,6 +133,7 @@ test "explicit blocks override allows and local records with zero TTL sinkholes 
         .{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } },
         .{ .name = "home.test", .addresses = .{ .aaaa = &.{[_]u8{1} ** 16} } },
     };
+    state.records = &records;
     const cases = [_]struct { qtype: u16, qclass: u16, data_len: usize }{
         .{ .qtype = 1, .qclass = 1, .data_len = 4 },
         .{ .qtype = 28, .qclass = 1, .data_len = 16 },
@@ -145,8 +148,10 @@ test "explicit blocks override allows and local records with zero TTL sinkholes 
         std.mem.writeInt(u16, buffer[0..2], id, .big);
         std.mem.writeInt(u16, buffer[test_query.len - 4 ..][0..2], case.qtype, .big);
         std.mem.writeInt(u16, buffer[test_query.len - 2 ..][0..2], case.qclass, .big);
-        const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &records, &cache, &upstreams, &state);
+        const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &cache, &upstreams, &state);
         try std.testing.expectEqual(id, decode.id(response));
+        try std.testing.expect(state.mutex.tryLock());
+        state.mutex.unlock(std.testing.io);
         try std.testing.expectEqual(@as(u16, 0x8190), decode.flags(response));
         try std.testing.expectEqual(case.qtype, std.mem.readInt(u16, response[test_query.len - 4 ..][0..2], .big));
         try std.testing.expectEqual(case.qclass, std.mem.readInt(u16, response[test_query.len - 2 ..][0..2], .big));
@@ -182,7 +187,7 @@ test "cached upstream answers cannot bypass a new explicit or imported block" {
         }
         const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
         var upstreams = try UpstreamPool.init(&addresses, 3000);
-        const response = try resolve(std.testing.io, test_query, &buffer, &.{}, &cache, &upstreams, &state);
+        const response = try resolve(std.testing.io, test_query, &buffer, &cache, &upstreams, &state);
         try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, response[response.len - 4 ..]);
         try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, response[test_query.len + 6 ..][0..4], .big));
     }
@@ -201,17 +206,19 @@ test "allows bypass imported blocks while local answers precede imports and cach
     const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
     var upstreams = try UpstreamPool.init(&addresses, 3000);
     const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
+    state.records = &records;
 
     // A local answer wins over both an imported block and an upstream cache hit.
-    const local = try resolve(std.testing.io, test_query, &buffer, &records, &cache, &upstreams, &state);
+    const local = try resolve(std.testing.io, test_query, &buffer, &cache, &upstreams, &state);
     try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 10 }, local[local.len - 4 ..]);
     try state.domains.allow("HOME.TEST.");
-    const allowed_local = try resolve(std.testing.io, test_query, &buffer, &records, &cache, &upstreams, &state);
+    const allowed_local = try resolve(std.testing.io, test_query, &buffer, &cache, &upstreams, &state);
     try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 10 }, allowed_local[allowed_local.len - 4 ..]);
 
     // Without a local record, the allow exposes the original upstream cache
     // entry; the preceding local answers must not have replaced it.
-    const allowed = try resolve(std.testing.io, test_query, &buffer, &.{}, &cache, &upstreams, &state);
+    state.records = &.{};
+    const allowed = try resolve(std.testing.io, test_query, &buffer, &cache, &upstreams, &state);
     try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 20 }, allowed[allowed.len - 4 ..]);
 }
 
@@ -226,13 +233,14 @@ test "COOKIE normalization preserves local responses and request IDs without cac
     const addresses = [_]std.Io.net.IpAddress{try std.Io.net.IpAddress.parseIp4("192.0.2.1", 53)};
     var upstreams = try UpstreamPool.init(&addresses, 3000);
     const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
+    state.records = &records;
     for ([_][]const u8{ "abcdefgh", "12345678" }, 0..) |cookie, i| {
         var buffer: [512]u8 = undefined;
         @memcpy(buffer[0..prefix.len], prefix);
         @memcpy(buffer[prefix.len..][0..cookie.len], cookie);
         const id: u16 = @intCast(0xab34 + i);
         std.mem.writeInt(u16, buffer[0..2], id, .big);
-        const response = try resolve(std.testing.io, buffer[0 .. prefix.len + cookie.len], &buffer, &records, &cache, &upstreams, &state);
+        const response = try resolve(std.testing.io, buffer[0 .. prefix.len + cookie.len], &buffer, &cache, &upstreams, &state);
         try std.testing.expectEqual(id, decode.id(response));
         try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 10 }, response[response.len - 4 ..]);
         try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, response[10..12], .big));
@@ -255,17 +263,19 @@ test "policy does not bypass signed COOKIE and malformed option rejection" {
     const signed = prefix ++ "abcdefgh" ++ "\x00\x00\xfa\x00\xff\x00\x00\x00\x00\x00\x00";
     @memcpy(buffer[0..signed.len], signed);
     buffer[11] = 2;
-    try std.testing.expectError(error.AuthenticatedCookie, resolve(std.testing.io, buffer[0..signed.len], &buffer, &.{}, &cache, &upstreams, &state));
+    try std.testing.expectError(error.AuthenticatedCookie, resolve(std.testing.io, buffer[0..signed.len], &buffer, &cache, &upstreams, &state));
 
     @memcpy(buffer[0..prefix.len], prefix);
     @memcpy(buffer[prefix.len..][0..8], "abcdefgh");
     buffer[prefix.len - 1] = 9;
-    try std.testing.expectError(error.InvalidOption, resolve(std.testing.io, buffer[0 .. prefix.len + 8], &buffer, &.{}, &cache, &upstreams, &state));
-    try std.testing.expectError(error.InvalidMessage, resolve(std.testing.io, &.{0}, &buffer, &.{}, &cache, &upstreams, &state));
-    try std.testing.expectError(error.InvalidQuestion, resolve(std.testing.io, test_query[0 .. test_query.len - 1], &buffer, &.{}, &cache, &upstreams, &state));
+    try std.testing.expectError(error.InvalidOption, resolve(std.testing.io, buffer[0 .. prefix.len + 8], &buffer, &cache, &upstreams, &state));
+    try std.testing.expectError(error.InvalidMessage, resolve(std.testing.io, &.{0}, &buffer, &cache, &upstreams, &state));
+    try std.testing.expectError(error.InvalidQuestion, resolve(std.testing.io, test_query[0 .. test_query.len - 1], &buffer, &cache, &upstreams, &state));
     @memcpy(buffer[0..test_query.len], test_query);
     buffer[5] = 2;
-    try std.testing.expectError(error.UnsupportedQuestion, resolve(std.testing.io, buffer[0..test_query.len], &buffer, &.{}, &cache, &upstreams, &state));
+    try std.testing.expectError(error.UnsupportedQuestion, resolve(std.testing.io, buffer[0..test_query.len], &buffer, &cache, &upstreams, &state));
+    try std.testing.expect(state.mutex.tryLock());
+    state.mutex.unlock(std.testing.io);
 }
 
 test "local RRsets return every address in order with shared TTL and matching family" {
@@ -287,11 +297,12 @@ test "local RRsets return every address in order with shared TTL and matching fa
             .addresses = .{ .aaaa = &.{ [_]u8{1} ** 16, [_]u8{2} ** 16 } },
         },
     };
+    state.records = &records;
     for (&records) |*record| {
         var buffer: [1232]u8 = undefined;
         @memcpy(buffer[0..test_query.len], test_query);
         std.mem.writeInt(u16, buffer[test_query.len - 4 ..][0..2], @intFromEnum(record.recordType()), .big);
-        const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &records, &cache, &upstreams, &state);
+        const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &cache, &upstreams, &state);
         try std.testing.expectEqual(@as(u16, 0x1234), decode.id(response));
         try std.testing.expectEqual(@as(u16, 0x8190), decode.flags(response));
         try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, response[4..6]);
@@ -338,6 +349,7 @@ test "local RRsets truncate atomically at legacy EDNS and output buffer limits" 
         .{ .name = long_name, .addresses = .{ .a = &ipv4 } },
         .{ .name = long_name, .addresses = .{ .aaaa = &ipv6 } },
     };
+    state.records = &records;
     for (&records) |*record| {
         const address_len: usize = if (record.recordType() == .a) 4 else 16;
         const complete_len = long_question.len + 16 * (12 + address_len);
@@ -369,7 +381,7 @@ test "local RRsets truncate atomically at legacy EDNS and output buffer limits" 
                 }
                 query_len += opt.len;
             }
-            const response = try resolve(std.testing.io, buffer[0..query_len], buffer[0..case.capacity], &records, &cache, &upstreams, &state);
+            const response = try resolve(std.testing.io, buffer[0..query_len], buffer[0..case.capacity], &cache, &upstreams, &state);
             try std.testing.expectEqual(@as(u16, 0x1234), decode.id(response));
             try std.testing.expectEqual(@as(u16, if (case.truncated) 0x8390 else 0x8190), decode.flags(response));
             try std.testing.expectEqual(@as(u16, if (case.truncated) 0 else 16), std.mem.readInt(u16, response[6..8], .big));
@@ -385,17 +397,18 @@ test "missing local address family falls through policy without suppressing bloc
     var state = State.init(std.testing.allocator);
     defer state.deinit();
     const records = [_]Record{.{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } }};
+    state.records = &records;
     var query: [test_query.len]u8 = undefined;
     @memcpy(&query, test_query);
     std.mem.writeInt(u16, query[test_query.len - 4 ..][0..2], 28, .big);
     var buffer: [512]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &records, &state));
+    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &state));
     try importTestNames(&state);
-    const blocked = (try managedAnswer(&query, &buffer, &records, &state)).?;
+    const blocked = (try managedAnswer(&query, &buffer, &state)).?;
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, blocked[6..8], .big));
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), blocked[blocked.len - 16 ..]);
     try state.domains.allow("home.test");
-    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &records, &state));
+    try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &state));
     try state.domains.block("home.test");
-    try std.testing.expect((try managedAnswer(&query, &buffer, &records, &state)) != null);
+    try std.testing.expect((try managedAnswer(&query, &buffer, &state)) != null);
 }
