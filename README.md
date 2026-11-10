@@ -374,7 +374,29 @@ filtering definitions. It keeps the file-backed `example-domains` list and adds
 `first-blocklist`, [HaGeZi Multi PRO mini](https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt)
 in plain-domain format. Despite the source URL's `/wildcard/` directory, VoidDNS
 matches these names exactly; it does not infer subdomain blocking.
-The example requires internet access to load that enabled source.
+The example also includes selected advertising, tracking, and security feeds
+from [netguide.io's Blocklists for Pi-hole](https://netguide.io/en/blocklists-for-pihole/):
+
+| Source IDs | Purpose | Enabled |
+| --- | --- | --- |
+| `firebog-adguard`, `firebog-admiral`, `firebog-easylist` | Advertising | Yes |
+| `firebog-easyprivacy`, `firebog-prigent-ads` | Tracking and advertising | Yes |
+| `matomo-referrer-spam` | Referrer spam | Yes |
+| `phishing-army` | Phishing Army extended | Yes |
+| `perflyst-android`, `perflyst-smarttv`, `perflyst-firetv` | Device tracking | No; opt in for relevant devices |
+
+All ten added URLs were downloaded and their complete contents passed VoidDNS's
+strict domain parser when added. This is a compatible selection, not a copy of
+every list on that page: remote hosts files, Adblock rules, and regex entries
+are not supported URL imports. Content-category and whole-service blocking
+lists were not selected. Device lists are disabled by default because they can
+affect device features; enable them individually after reviewing their contents.
+
+The example requires internet access for its enabled URL sources. These feeds
+can overlap with HaGeZi and each other, increasing download time and RAM usage.
+Any enabled source failing to load or parse prevents startup; upstream contents
+can change after validation. Disable unwanted sources rather than assuming all
+Pi-hole lists are compatible. Matching remains exact, including for these feeds.
 
 The file is authoritative, not a seed merged with another store. Apply changes
 through the explicit reload channel above or restart. Omit `blocks` and `allows`
@@ -600,6 +622,9 @@ DNS throughput. At `"info"` or a more restrictive level, request-name decoding
 and formatting for logging are skipped at runtime.
 
 ## Management API
+
+See [`api.md`](api.md) for the developer and AI-agent API reference, request
+schemas, operation lifecycle, error handling, and a complete client workflow.
 
 The embedded server uses `karlseguin/http.zig`, pinned to Zig 0.17-compatible
 revision `1bb71ff128a044b1645df91046473c38abbf965c`. Omit `api` or set

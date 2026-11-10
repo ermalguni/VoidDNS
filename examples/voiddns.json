@@ -63,6 +63,106 @@
           "value": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt"
         },
         "format": "domains"
+      },
+      {
+        "id": "firebog-adguard",
+        "name": "AdGuard DNS (Firebog)",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://v.firebog.net/hosts/AdguardDNS.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "firebog-admiral",
+        "name": "Admiral (Firebog)",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://v.firebog.net/hosts/Admiral.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "firebog-easylist",
+        "name": "EasyList (Firebog)",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://v.firebog.net/hosts/Easylist.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "firebog-easyprivacy",
+        "name": "EasyPrivacy (Firebog)",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://v.firebog.net/hosts/Easyprivacy.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "firebog-prigent-ads",
+        "name": "Prigent Ads (Firebog)",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://v.firebog.net/hosts/Prigent-Ads.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "perflyst-android",
+        "name": "Perflyst Android tracking",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/android-tracking.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "perflyst-smarttv",
+        "name": "Perflyst Smart TV tracking",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/SmartTV.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "perflyst-firetv",
+        "name": "Perflyst Amazon Fire TV tracking",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/AmazonFireTV.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "matomo-referrer-spam",
+        "name": "Matomo referrer spam",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/matomo-org/referrer-spam-blacklist/master/spammers.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "phishing-army",
+        "name": "Phishing Army extended",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://phishing.army/download/phishing_army_blocklist_extended.txt"
+        },
+        "format": "domains"
       }
     ],
     "domains": ["explicit.example"]
