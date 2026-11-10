@@ -20,7 +20,7 @@
     "level": "debug"
   },
   "api": {
-    "enabled": false,
+    "enabled": true,
     "listen": {
       "address": "127.0.0.1",
       "port": 8080

@@ -1,14 +1,14 @@
 const std = @import("std");
 
-/// Exactly 64 hexadecimal characters, optionally terminated by LF or CRLF.
-/// Authentication is case-sensitive: the digest covers the key's exact spelling.
+/// Arbitrary file contents, with no trimming or length/character restrictions.
+/// Authentication is case-sensitive: the digest covers the file's exact bytes.
 /// Only the SHA-256 digest survives loading; plaintext is securely erased.
 pub const Auth = struct {
     digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, key_file: []const u8) !Auth {
         _ = allocator;
-        var plaintext: [67]u8 = undefined;
+        var plaintext: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &plaintext);
         const file = try std.Io.Dir.cwd().openFile(io, key_file, .{});
         defer file.close(io);
@@ -18,22 +18,19 @@ pub const Auth = struct {
             if (stat.permissions.toMode() & 0o077 != 0) return error.InsecureApiKeyPermissions;
         }
         var reader = file.reader(io, &.{});
-        const length = try reader.interface.readSliceShort(&plaintext);
-        if (length > 66) return error.InvalidApiKeyFile;
-        var key: []const u8 = plaintext[0..length];
-        if (std.mem.endsWith(u8, key, "\n")) {
-            key = key[0 .. key.len - 1];
-            if (std.mem.endsWith(u8, key, "\r")) key = key[0 .. key.len - 1];
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&hasher));
+        while (true) {
+            const length = try reader.interface.readSliceShort(&plaintext);
+            hasher.update(plaintext[0..length]);
+            if (length < plaintext.len) break;
         }
-        if (key.len != 64) return error.InvalidApiKeyFile;
-        for (key) |byte| if (!std.ascii.isHex(byte)) return error.InvalidApiKeyFile;
         var auth: Auth = undefined;
-        std.crypto.hash.sha2.Sha256.hash(key, &auth.digest, .{});
+        hasher.final(&auth.digest);
         return auth;
     }
 
     pub fn verify(self: *const Auth, key: []const u8) bool {
-        if (key.len != 64) return false;
         var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &digest);
         std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
@@ -50,10 +47,10 @@ test "authentication loads one key and compares digests" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const key = "My user-chosen key!";
     try tmp.dir.writeFile(io, .{
         .sub_path = "key",
-        .data = key ++ "\r\n",
+        .data = key,
         .flags = .{ .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file },
     });
     const path = try tmp.dir.realPathFileAlloc(io, "key", allocator);
@@ -62,14 +59,17 @@ test "authentication loads one key and compares digests" {
     defer auth.deinit();
     try std.testing.expect(auth.verify(key));
     try std.testing.expect(!auth.verify(key ++ "\n"));
-    try std.testing.expect(!auth.verify("1123456789abcdef" ++ key[16..]));
+    try std.testing.expect(!auth.verify("my user-chosen key!"));
     try std.testing.expect(!auth.verify(""));
-    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = key ++ "\nsecond" });
-    try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = &@as([64]u8, @splat('z')) });
-    try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = &@as([63]u8, @splat('a')) });
-    try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
+    const long_key: [8193]u8 = @splat('z');
+    for ([_][]const u8{ "", "x", " spaced key \r\n", "line\nsecond", "\x00\xff", long_key[0..4096], &long_key }) |contents| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = contents });
+        var loaded = try Auth.load(allocator, io, path);
+        defer loaded.deinit();
+        try std.testing.expect(loaded.verify(contents));
+        try std.testing.expect(!loaded.verify("different key"));
+        if (contents.len > 0) try std.testing.expect(!loaded.verify(contents[0 .. contents.len - 1]));
+    }
     if (@hasDecl(std.Io.File.Permissions, "fromMode")) {
         const file = try tmp.dir.openFile(io, "key", .{});
         defer file.close(io);
