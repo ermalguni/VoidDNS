@@ -64,7 +64,7 @@ pub const Manager = struct {
         try temporary.replace(io);
         syncDirectory(dir, io) catch |err| {
             diagnostic.set("configuration replaced, but directory sync failed; crash durability is unknown: {s}", .{@errorName(err)});
-            return err;
+            return error.DurabilityUncertain;
         };
     }
 };
@@ -212,7 +212,7 @@ test "invalid saves preserve original bytes and create no temporary files" {
     }};
     try std.testing.expectError(error.UnsupportedUriScheme, manager.save(io, &invalid, &diagnostic));
     try expectContents(tmp.dir, "config.json", minimal_json);
-    const source: @import("../blocklist/source.zig").Source = .{
+    const source: @import("../blocklist/source.zig").Source.Definition = .{
         .id = "same",
         .enabled = false,
         .source = .{ .kind = .file, .value = "missing" },
@@ -254,7 +254,7 @@ test "save bounds serialized output and preserves an exact-limit document on rej
     defer allocator.free(path);
     var manager = try Manager.init(allocator, path);
     defer manager.deinit();
-    var sources = [_]@import("../blocklist/source.zig").Source{.{
+    var sources = [_]@import("../blocklist/source.zig").Source.Definition{.{
         .id = "file",
         .source = .{ .kind = .file, .value = "x" },
         .format = .domains,

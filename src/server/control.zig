@@ -1,4 +1,5 @@
 const std = @import("std");
+const Call = @import("../api/bridge.zig").Call;
 
 pub const max_command_bytes = 4096;
 pub const request_capacity = 16;
@@ -10,6 +11,7 @@ pub const Request = union(enum) {
     refresh_all,
     save: []u8,
     quit,
+    api: *Call,
 
     pub fn deinit(self: Request, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -24,6 +26,7 @@ pub const Notification = union(enum) {
     request: Request,
     worker_failed: Failure,
     control_failed: anyerror,
+    operation_ready,
 };
 
 /// Bounded request mailbox with reserved failure slots. A finishing worker
@@ -37,6 +40,38 @@ pub const Mailbox = struct {
     count: usize = 0,
     worker_failure: ?Failure = null,
     control_failure: ?anyerror = null,
+    operation_ready: bool = false,
+    api_closed: bool = false,
+
+    pub fn putApi(self: *Mailbox, io: std.Io, call: *Call) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        if (self.api_closed) return error.ShuttingDown;
+        if (self.count == self.requests.len) return error.QueueFull;
+        self.requests[(self.first + self.count) % self.requests.len] = .{ .api = call };
+        self.count += 1;
+        self.available.signal(io);
+    }
+
+    pub fn closeApi(self: *Mailbox, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.api_closed = true;
+        for (0..self.count) |offset| {
+            const request = &self.requests[(self.first + offset) % self.requests.len];
+            if (request.* == .api) {
+                request.api.finish(io, error.ShuttingDown);
+                request.* = .quit;
+            }
+        }
+    }
+
+    pub fn operationReady(self: *Mailbox, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.operation_ready = true;
+        self.available.signal(io);
+    }
 
     pub fn put(self: *Mailbox, io: std.Io, request: Request) std.Io.Cancelable!void {
         try self.mutex.lock(io);
@@ -58,6 +93,10 @@ pub const Mailbox = struct {
             if (self.control_failure) |err| {
                 self.control_failure = null;
                 return .{ .control_failed = err };
+            }
+            if (self.operation_ready) {
+                self.operation_ready = false;
+                return .operation_ready;
             }
             if (self.count != 0) {
                 const request = self.requests[self.first];
@@ -213,4 +252,21 @@ test "refresh ID survives command buffer reuse and malformed IDs are not queued"
     try std.testing.expect(!try producer.command(std.testing.io, "refresh bad id"));
     try std.testing.expect(!try producer.command(std.testing.io, "refresh "));
     try std.testing.expectEqual(@as(usize, 0), mailbox.count);
+}
+
+test "API queue rejects saturation and closure completes borrowed calls" {
+    const io = std.testing.io;
+    var mailbox: Mailbox = .{};
+    defer mailbox.deinit(std.testing.allocator);
+    var call: Call = .{
+        .allocator = std.testing.allocator,
+        .request = .{ .method = "GET", .path = "/api/v1/status", .query = "", .body = "", .if_match = null },
+    };
+    for (0..request_capacity) |_| try mailbox.put(io, .reload);
+    try std.testing.expectError(error.QueueFull, mailbox.putApi(io, &call));
+    _ = try mailbox.receive(io);
+    try mailbox.putApi(io, &call);
+    mailbox.closeApi(io);
+    try std.testing.expectError(error.ShuttingDown, call.awaitResult(io));
+    try std.testing.expectError(error.ShuttingDown, mailbox.putApi(io, &call));
 }

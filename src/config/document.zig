@@ -6,6 +6,16 @@ const Source = @import("../blocklist/source.zig").Source;
 /// constructed documents may borrow data until converted with fromDocument.
 pub const Document = struct {
     schema_version: u32,
+    api: ?struct {
+        enabled: bool = true,
+        listen: struct {
+            address: []const u8 = "127.0.0.1",
+            port: u16 = 8080,
+        } = .{},
+        key_file: ?[]const u8 = null,
+        file_root: ?[]const u8 = null,
+        allow_private_sources: bool = false,
+    } = null,
     dns: struct {
         listen: struct {
             address: []const u8 = "127.0.0.1",
@@ -32,7 +42,7 @@ pub const Document = struct {
         addresses: []const []const u8,
     } = &.{},
     blocks: struct {
-        lists: []const Source = &.{},
+        lists: []const Source.Definition = &.{},
         domains: []const []const u8 = &.{},
     } = .{},
     allows: struct {

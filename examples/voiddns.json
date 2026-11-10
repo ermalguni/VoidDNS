@@ -19,6 +19,15 @@
   "logging": {
     "level": "debug"
   },
+  "api": {
+    "enabled": false,
+    "listen": {
+      "address": "127.0.0.1",
+      "port": 8080
+    },
+    "key_file": "api.key",
+    "allow_private_sources": false
+  },
   "records": [
     {
       "name": "home.test",

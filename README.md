@@ -30,6 +30,12 @@ are required. Optional sections and fields use the following defaults:
 | `cache.capacity` | `4096` | Nonnegative integer fitting `usize`; zero disables caching |
 | `logging.level` | `"info"` | `"err"`, `"warn"`, `"info"`, `"debug"` |
 | `records` | `[]` | Local IN A/AAAA record sets; see below |
+| `api` | Omitted / disabled | Optional management HTTP configuration |
+| `api.enabled` | `true` when `api` is present | Boolean |
+| `api.listen.address`, `api.listen.port` | `"127.0.0.1"`, `8080` | IPv4 literal and port 1–65535 |
+| `api.key_file` | Required when enabled | Restricted file containing a 64-character hexadecimal API key |
+| `api.file_root` | Omitted | Root for API-managed relative file sources; omission denies them |
+| `api.allow_private_sources` | `false` | Explicitly permit private-network API URL sources |
 
 Capacity counts cache slots, not bytes; large values still depend on available
 memory. Hostnames and IPv6 transport addresses are not supported. Binding beyond
@@ -101,7 +107,8 @@ mailbox. Reload validates the entire document, then compares normalized records,
 explicit rules, and source definitions with the last successfully applied state.
 Whitespace, equivalent domain spelling, and record/source collection order do not
 trigger changes. RRset address order remains significant because it controls
-answer order. A semantically unchanged reload is a no-op.
+answer order. A semantically unchanged reload retains DNS resources.
+Every completed management operation advances its revision.
 
 | Change | Runtime work |
 | --- | --- |
@@ -157,7 +164,8 @@ file is replaced. There is no cross-process writer lock.
 import or bind. The previous DNS configuration remains active if recovery
 succeeds, but the saved file remains the authority for the next reload/startup.
 Coordinate external editors with application saves to avoid last-writer-wins
-overwrites. This configuration editor does not add persistent API/peer CRUD.
+overwrites. API CRUD also persists through this configuration file; peer-managed
+durability and synchronization remain unimplemented.
 The configuration remains authoritative: records/rules/source definitions absent
 from a successful candidate are removed. Records are identified by normalized
 name/type, rules by normalized name/action, and sources by their stable ID.
@@ -269,8 +277,8 @@ Every list requires `id`, `source.kind`, `source.value`, and `format`:
 Relative file sources resolve against the **configuration file's directory**, not
 the working directory. Relative `--config` paths resolve against the working directory.
 HTTP/HTTPS loads require a successful status; HTTPS uses system CA verification.
-Each list is limited to 32 MiB after decompression. Downloads currently have no
-whole-request deadline, so an unresponsive source can delay startup.
+Each list is limited to 32 MiB after decompression. Every source load has a
+30-second whole-load deadline, including DNS resolution and response decoding.
 
 ### Supported list formats
 
@@ -318,8 +326,8 @@ files, failed downloads, malformed content, or invalid definitions stop startup.
 Definitions survive restarts in the configuration file; downloaded snapshots do not.
 Each restart fetches every enabled source. Reload retains unchanged snapshots,
 so unrelated record edits work even when an existing source is unavailable.
-No management HTTP endpoints, automatic refresh scheduler, file watcher, or peer
-synchronization are implemented.
+The management HTTP API supports persistent CRUD and explicit refresh. No
+automatic refresh scheduler, file watcher, or peer synchronization is implemented.
 
 The in-process blocklist service supports add, replace, refresh, and remove.
 Failed replacements/refreshes retain the previous complete snapshot. Source
@@ -441,3 +449,178 @@ lines. Raw DNS packets are not logged.
 Verbose per-query logging adds I/O overhead and should be disabled when measuring
 DNS throughput. At `"info"` or a more restrictive level, request-name decoding
 and formatting for logging are skipped at runtime.
+
+## Management API
+
+The embedded server uses `karlseguin/http.zig`, pinned to Zig 0.16-compatible
+revision `9b14af98fde5e98abb9a8376fe02b42003e835bf`. Omit `api` or set
+`api.enabled` to `false` to disable it. The example leaves it disabled.
+
+Generate a key in the configuration directory:
+
+```sh
+(umask 077; openssl rand -hex 32 > examples/api.key)
+```
+
+Then enable the example's `api` section, or add:
+
+```json
+"api": {
+  "enabled": true,
+  "listen": { "address": "127.0.0.1", "port": 8080 },
+  "key_file": "api.key",
+  "allow_private_sources": false
+}
+```
+
+`key_file` and `file_root` resolve relative to the configuration directory.
+The key must contain exactly 64 hexadecimal characters, optionally followed by
+LF or CRLF; comparison is case-sensitive. On POSIX, group/other permission bits
+must be zero. The server retains only a SHA-256 digest and erases the key's
+temporary read buffer. Send exactly one `X-API-Key` header. Missing, duplicate,
+or incorrect keys return `401`; all keys have administrator privileges.
+
+API configuration and key rotation require a restart. Live configuration
+updates that change the API settings are rejected before saving. No built-in
+TLS or CORS is provided: for remote access, use HTTPS termination and network
+access controls. Serve a browser frontend and `/api/` behind the same origin;
+do not distribute an administrator key inside a public frontend bundle.
+
+### Resources and actions
+
+All paths below start with `/api/v1` and require authentication, including the
+embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /status` | DNS listener readiness, worker generation, active address, revision, current operation, and saved/active agreement |
+| `GET /settings` | Active `dns`, `upstream`, `cache`, and `logging` settings |
+| `PUT /settings` | Replace all four settings sections; retain records, rules, sources, and API settings |
+| `GET /config` | Canonical active configuration, not the potentially different file contents |
+| `PUT /config` | Save and activate a complete configuration |
+| `POST /config/validate` | Strict schema/semantic validation without fetching sources or binding sockets |
+| `POST /config/reload` | Load and activate the configured file |
+| `GET /domains`, `POST /domains` | List or create explicit allow/block rules |
+| `GET/PUT/DELETE /domains/{id}` | Read, replace, or delete an explicit rule |
+| `GET /records`, `POST /records` | List or create local IN A/AAAA record sets |
+| `GET/PUT/DELETE /records/{id}` | Read, replace, or delete a record set |
+| `GET /blocklists`, `POST /blocklists` | List or create blocklist source definitions |
+| `GET/PUT/DELETE /blocklists/{id}` | Read, replace, or delete a source |
+| `POST /blocklists/{id}/refresh` | Refresh one source from its active definition |
+| `POST /blocklists/refresh` | Atomically refresh all enabled sources |
+| `GET /operations/{id}` | Poll a running or recently completed operation |
+| `GET /policy/check?name=example.test&type=A` | Explain exact-name policy; never query upstream |
+| `GET /cache` | Cache capacity and occupied slots, including entries not yet reclaimed after expiry |
+| `DELETE /cache/entries` | Clear all cached upstream responses |
+
+Status readiness means the DNS listener is running, not that upstream resolvers
+are healthy. Policy checks accept `A`, `AAAA`, or a numeric DNS type and assume
+class IN. They report the normalized name, decision, reason, and matching
+explicit/imported/local conditions. There are no imported allowlists, query
+statistics/history, diagnostic-resolution endpoints, or peer endpoints.
+
+Domain request bodies contain `{"domain":"example.test","action":"block"}` or
+`"allow"`. Their deterministic IDs are `block:example.test` and
+`allow:example.test`. Record request bodies use the same `name`, `type`, `ttl`,
+and `addresses` fields as configuration records; IDs are `A:home.test` and
+`AAAA:home.test`. URL-encode IDs in paths. PUT can change a rule/record's identity,
+but source IDs are immutable. Creating a duplicate identity returns `409`.
+Do not include response-only `id` fields in rule/record request bodies.
+
+Collection responses contain `items`, `next_cursor`, and `revision`. `limit`
+is 1–100, default 50; `after` accepts the previous page's URL-encoded opaque
+cursor. IDs sort lexicographically. Cursors include the revision: after a
+completed mutation, a stale cursor returns `409` and the client must restart
+its listing. Domain collections additionally accept `action=allow|block` and
+an exact, normalized `domain` filter.
+
+### Revisions, operations, and persistence
+
+Read responses expose a quoted global revision in `ETag`. All mutations,
+including POST creation, reload, refresh, and cache clearing, require that exact
+value in `If-Match`. Missing preconditions return `428`; stale preconditions
+return `412`. Validation does not require a revision. One writer operation runs
+at a time; another valid-revision mutation returns `409` while it is busy.
+
+Persistent edits, reload, and refresh return `202`, for example:
+
+```json
+{"operation":{"id":1,"status":"running","result":null,"error":null},"revision":1}
+```
+
+Poll `/operations/1` until `status` is `succeeded` or `failed`. Completion
+includes `result.saved`, `result.active`, `result.durability`
+(`unchanged`, `durable`, or `uncertain`), the resulting `revision`, and an
+optional `resource_id`. Failures include an error name. `202` means accepted,
+not successful. The last 64 completed operations are retained in RAM; older
+IDs return `404`. Operation IDs and revisions reset on restart.
+
+CRUD and settings writes build a candidate from the active configuration,
+validate it, atomically save it, then prepare and publish its runtime changes.
+The saved file—not a separate database—makes these changes survive restart.
+File saving, source loading, and parsing happen in a background preparation
+task. Main remains the only publisher; GETs and operation polling can proceed
+while source I/O is pending. Runtime cache/pool inspection or replacement can
+wait for an in-progress DNS resolution boundary.
+
+If import or listener activation fails after saving, the old runtime stays
+active while the candidate remains on disk. The failed operation reports
+`saved: true, active: false`; `/status.saved_matches_active` becomes false.
+It is null while an operation is running. The agreement flag tracks operations
+performed by this process; it does not detect external file edits. A directory
+sync failure reports uncertain durability and does not activate the candidate.
+Use `GET /config` to recover the active document, then explicitly PUT it to
+restore the saved configuration if desired. Do not assume a failed write left
+the file unchanged.
+
+Every completed operation, including failures, advances the management revision;
+cache clearing does so immediately and returns `200`. Readiness, source contents,
+operation history, and cached DNS packets are not persisted. Stdin commands use
+the same writer; `quit`/EOF drain accepted operations before exit.
+
+### Safe source management
+
+Source bodies use the configuration `id`, optional `name`, `enabled`, `source`,
+and `format` fields. API-added or content-modified sources receive the persisted
+`api_managed: true` marker. Clients cannot clear this marker to regain operator
+trust. It ensures restrictions also apply to refresh and startup after restart.
+Unchanged operator-provided locations retain their trust; metadata-only edits
+do not convert their paths or refetch their contents.
+
+API-managed local sources require `api.file_root`. Their values are relative to
+that root, never the configuration directory; absolute paths, traversal,
+platform separator tricks, symlinks, and non-regular files are rejected.
+API-managed URL sources resolve and validate their destination addresses once
+per load, connect to a validated numeric address, and retain the original
+hostname for TLS verification and HTTP Host. Redirects are refused.
+Private, loopback, link-local, multicast, and reserved addresses are denied
+unless `allow_private_sources` explicitly enables private-network access.
+The 32 MiB decompressed limit and 30-second deadline apply to all source loads.
+
+Ordinary request bodies are limited to 64 KiB; `/config` and `/config/validate`
+permit 1 MiB. Application errors use JSON `error.code` and `error.message`.
+Malformed HTTP framing and parser-level limits may return plaintext errors from
+http.zig. Oversized or unread rejected bodies close the connection rather than
+being drained; clients still transmitting a rejected body may see a reset.
+
+### curl example
+
+The following shell example uses `jq` to read JSON results:
+
+```sh
+API=http://127.0.0.1:8080/api/v1
+KEY=$(cat examples/api.key)
+curl --fail-with-body -H "X-API-Key: $KEY" "$API/status"
+
+REV=$(curl --fail-with-body -sS -H "X-API-Key: $KEY" "$API/status" | jq -r .revision)
+OP=$(curl --fail-with-body -sS \
+  -H "X-API-Key: $KEY" -H "If-Match: \"$REV\"" \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"blocked.test","action":"block"}' "$API/domains" |
+  jq -r .operation.id)
+curl --fail-with-body -H "X-API-Key: $KEY" "$API/operations/$OP"
+```
+
+Repeat the last GET until it completes; obtain a fresh revision before the next
+mutation. Use protected curl configuration/header files where exposing a key in
+process arguments is unacceptable.

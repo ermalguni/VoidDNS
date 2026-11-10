@@ -87,6 +87,7 @@ pub const Service = struct {
                     if (change.snapshot != null) service.index.release(old.snapshot);
                     if (old.source.name) |name| self.allocator.free(name);
                     self.allocator.free(old.source.source.value);
+                    if (old.source.access.file_root) |root| self.allocator.free(root);
                 } else {
                     service.sources.putAssumeCapacityNoClobber(change.source.id, .{
                         .source = change.source,
@@ -184,6 +185,9 @@ pub const Service = struct {
 
     fn sameLocation(a: Source, b: Source) bool {
         return a.format == b.format and a.source.kind == b.source.kind and
+            a.api_managed == b.api_managed and
+            a.access.allow_private_sources == b.access.allow_private_sources and
+            sameName(a.access.file_root, b.access.file_root) and
             std.mem.eql(u8, a.source.value, b.source.value);
     }
 
@@ -220,6 +224,7 @@ pub const Service = struct {
         self.index.release(old.snapshot);
         if (old.source.name) |name| self.allocator.free(name);
         self.allocator.free(old.source.source.value);
+        if (old.source.access.file_root) |root| self.allocator.free(root);
         self.report("replaced", owned, snapshot.len);
     }
 

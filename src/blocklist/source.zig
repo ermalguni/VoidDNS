@@ -9,6 +9,46 @@ pub const Source = struct {
         value: []const u8,
     },
     format: enum { hosts, domains },
+    /// Persisted provenance: API-managed definitions never regain operator trust.
+    api_managed: bool = false,
+    /// Owned runtime policy; deliberately absent from the editable document.
+    access: Access = .{},
+
+    pub const Access = struct {
+        file_root: ?[]const u8 = null,
+        allow_private_sources: bool = false,
+    };
+
+    pub const Definition = struct {
+        id: []const u8,
+        name: ?[]const u8 = null,
+        enabled: bool = true,
+        source: @FieldType(Source, "source"),
+        format: @FieldType(Source, "format"),
+        api_managed: bool = false,
+
+        pub fn runtime(self: Definition) Source {
+            return .{
+                .id = self.id,
+                .name = self.name,
+                .enabled = self.enabled,
+                .source = self.source,
+                .format = self.format,
+                .api_managed = self.api_managed,
+            };
+        }
+    };
+
+    pub fn definition(self: Source) Definition {
+        return .{
+            .id = self.id,
+            .name = self.name,
+            .enabled = self.enabled,
+            .source = self.source,
+            .format = self.format,
+            .api_managed = self.api_managed,
+        };
+    }
 
     /// Validate disabled definitions too. IDs and display names cannot inject
     /// terminal controls or extra log lines. Locations are never logged.
@@ -52,12 +92,16 @@ pub const Source = struct {
         const name = if (self.name) |value| try allocator.dupe(u8, value) else null;
         errdefer if (name) |value| allocator.free(value);
         const value = try allocator.dupe(u8, self.source.value);
+        errdefer allocator.free(value);
+        const root = if (self.access.file_root) |path| try allocator.dupe(u8, path) else null;
         return .{
             .id = id,
             .name = name,
             .enabled = self.enabled,
             .source = .{ .kind = self.source.kind, .value = value },
             .format = self.format,
+            .api_managed = self.api_managed,
+            .access = .{ .file_root = root, .allow_private_sources = self.access.allow_private_sources },
         };
     }
 
@@ -65,6 +109,7 @@ pub const Source = struct {
         allocator.free(self.id);
         if (self.name) |name| allocator.free(name);
         allocator.free(self.source.value);
+        if (self.access.file_root) |root| allocator.free(root);
         self.* = undefined;
     }
 };

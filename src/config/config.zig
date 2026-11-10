@@ -10,6 +10,21 @@ pub const Document = document_module.Document;
 
 pub const max_file_size = 1024 * 1024;
 
+pub const Api = struct {
+    enabled: bool = true,
+    listen_address: []const u8 = "127.0.0.1",
+    port: u16 = 8080,
+    key_file: ?[]const u8 = null,
+    file_root: ?[]const u8 = null,
+    allow_private_sources: bool = false,
+
+    fn deinit(self: *Api, allocator: std.mem.Allocator) void {
+        allocator.free(self.listen_address);
+        if (self.key_file) |path| allocator.free(path);
+        if (self.file_root) |path| allocator.free(path);
+    }
+};
+
 /// Owns typed configuration definitions and paths, never runtime filtering state.
 pub const Config = struct {
     listen_address: std.Io.net.IpAddress,
@@ -21,8 +36,10 @@ pub const Config = struct {
     definitions: Definitions,
     records: []const Record,
     base_dir: []const u8,
+    api: ?Api = null,
 
     pub fn deinit(self: *Config) void {
+        if (self.api) |*api| api.deinit(self.allocator);
         self.definitions.deinit(self.allocator);
         freeRecords(self.allocator, self.records);
         self.allocator.free(self.records);
@@ -145,6 +162,38 @@ pub fn fromDocument(
         allocator.free(records);
     }
     const owned_base_dir = try allocator.dupe(u8, base_dir);
+    errdefer allocator.free(owned_base_dir);
+    var api: ?Api = null;
+    errdefer if (api) |*settings| settings.deinit(allocator);
+    if (document.api) |settings| {
+        _ = try address(settings.listen.address, settings.listen.port, "api.listen", diagnostic);
+        if (settings.enabled and settings.key_file == null)
+            return diagnostic.invalid("api.key_file: required when API is enabled", .{});
+        if (settings.key_file) |path| {
+            if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+                return diagnostic.invalid("api.key_file: expected a nonempty path", .{});
+        }
+        if (settings.file_root) |path| {
+            if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+                return diagnostic.invalid("api.file_root: expected a nonempty path", .{});
+        }
+        api = .{
+            .enabled = settings.enabled,
+            .listen_address = try allocator.dupe(u8, settings.listen.address),
+            .port = settings.listen.port,
+            .allow_private_sources = settings.allow_private_sources,
+        };
+        if (settings.key_file) |path| api.?.key_file = try resolvePath(allocator, base_dir, path);
+        if (settings.file_root) |path| api.?.file_root = try resolvePath(allocator, base_dir, path);
+    }
+    for (definitions.sources.items) |*source| {
+        if (source.api_managed) {
+            if (api) |settings| {
+                source.access.allow_private_sources = settings.allow_private_sources;
+                if (settings.file_root) |path| source.access.file_root = try allocator.dupe(u8, path);
+            }
+        }
+    }
 
     return .{
         .listen_address = listen_address,
@@ -156,7 +205,95 @@ pub fn fromDocument(
         .definitions = definitions,
         .records = records,
         .base_dir = owned_base_dir,
+        .api = api,
     };
+}
+
+fn resolvePath(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]const u8 {
+    return if (std.fs.path.isAbsolute(path))
+        allocator.dupe(u8, path)
+    else
+        std.fs.path.join(allocator, &.{ base_dir, path });
+}
+
+fn documentPath(allocator: std.mem.Allocator, base_dir: []const u8, path: ?[]const u8) !?[]const u8 {
+    const value = path orelse return null;
+    return if (std.fs.path.isAbsolute(value))
+        try allocator.dupe(u8, value)
+    else
+        try std.fs.path.relative(allocator, "/", null, base_dir, value);
+}
+
+/// Canonical active definitions. Every slice is owned by the caller's arena.
+pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
+    var result: Document = .{
+        .schema_version = 1,
+        .dns = .{ .listen = .{ .address = try ip4Text(allocator, self.listen_address.ip4.bytes), .port = self.listen_address.getPort() } },
+        .upstream = .{ .servers = undefined, .timeout_ms = self.upstream_timeout_ms },
+        .cache = .{ .capacity = self.cache_capacity },
+        .logging = .{ .level = self.log_level },
+    };
+    const Server = std.meta.Elem(@FieldType(@FieldType(Document, "upstream"), "servers"));
+    const servers = try allocator.alloc(Server, self.upstream_addresses.len);
+    for (servers, self.upstream_addresses) |*server, ip| {
+        server.* = .{ .address = try ip4Text(allocator, ip.ip4.bytes), .port = ip.getPort() };
+    }
+    result.upstream.servers = servers;
+    if (self.api) |api| result.api = .{
+        .enabled = api.enabled,
+        .listen = .{ .address = try allocator.dupe(u8, api.listen_address), .port = api.port },
+        .key_file = try documentPath(allocator, self.base_dir, api.key_file),
+        .file_root = try documentPath(allocator, self.base_dir, api.file_root),
+        .allow_private_sources = api.allow_private_sources,
+    };
+    result.blocks.domains = try copyStrings(allocator, self.definitions.blocks.items);
+    result.allows.domains = try copyStrings(allocator, self.definitions.allows.items);
+    const Source = @import("../blocklist/source.zig").Source;
+    const sources = try allocator.alloc(Source.Definition, self.definitions.sources.items.len);
+    for (sources, self.definitions.sources.items) |*destination, source| {
+        destination.* = source.definition();
+        destination.id = try allocator.dupe(u8, source.id);
+        destination.name = if (source.name) |name| try allocator.dupe(u8, name) else null;
+        destination.source.value = try allocator.dupe(u8, source.source.value);
+    }
+    result.blocks.lists = sources;
+    const DocumentRecord = std.meta.Elem(@FieldType(Document, "records"));
+    const records = try allocator.alloc(DocumentRecord, self.records.len);
+    for (records, self.records) |*destination, record| {
+        const addresses = try allocator.alloc([]const u8, switch (record.addresses) {
+            inline else => |values| values.len,
+        });
+        switch (record.addresses) {
+            .a => |values| for (addresses, values) |*text, bytes| {
+                text.* = try ip4Text(allocator, bytes);
+            },
+            .aaaa => |values| for (addresses, values) |*text, bytes| {
+                const ip: std.Io.net.Ip6Address.Unresolved = .{ .bytes = bytes, .interface_name = null };
+                text.* = try std.fmt.allocPrint(allocator, "{f}", .{ip});
+            },
+        }
+        destination.* = .{
+            .name = try allocator.dupe(u8, record.name),
+            .type = switch (record.addresses) {
+                .a => .A,
+                .aaaa => .AAAA,
+            },
+            .ttl = record.ttl_seconds,
+            .addresses = addresses,
+        };
+    }
+    result.records = records;
+    return result;
+}
+
+fn ip4Text(allocator: std.mem.Allocator, bytes: [4]u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
+}
+
+fn copyStrings(allocator: std.mem.Allocator, strings: []const []const u8) ![]const []const u8 {
+    const result = try allocator.alloc([]const u8, strings.len);
+    for (result, strings) |*destination, text| destination.* = try allocator.dupe(u8, text);
+    return result;
 }
 
 fn freeRecords(allocator: std.mem.Allocator, records: []const Record) void {
@@ -641,7 +778,7 @@ test "constructed documents receive the same semantic validation as parsed input
     try std.testing.expectError(error.InvalidDomain, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
     document = valid;
     const Source = @import("../blocklist/source.zig").Source;
-    var source: Source = .{
+    var source: Source.Definition = .{
         .id = "disabled",
         .enabled = false,
         .source = .{ .kind = .file, .value = "missing" },
@@ -824,4 +961,42 @@ fn parseRecordsWithFailingAllocator(allocator: std.mem.Allocator) !void {
 
 test "records release all partial allocations on failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, parseRecordsWithFailingAllocator, .{});
+}
+
+test "API configuration validates listener and independently owns resolved paths" {
+    var diagnostic: Diagnostic = .{};
+    try expectInvalid("{\"schema_version\":1,\"api\":{},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":1,\"api\":{\"enabled\":false,\"listen\":{\"address\":\"localhost\"}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":1,\"api\":{\"enabled\":false,\"listen\":{\"port\":0}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    var settings = try parse(std.testing.allocator,
+        \\{"schema_version":1,"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1"}]}}
+    , "/configuration", &diagnostic);
+    defer settings.deinit();
+    try std.testing.expectEqualStrings("/configuration/key", settings.api.?.key_file.?);
+    try std.testing.expectEqualStrings("/configuration/lists", settings.api.?.file_root.?);
+    try std.testing.expectEqual(@as(u16, 8080), settings.api.?.port);
+}
+
+test "canonical document round trip retains normalized records rules and managed policy" {
+    const allocator = std.testing.allocator;
+    var diagnostic: Diagnostic = .{};
+    var settings = try parse(allocator,
+        \\{"schema_version":1,"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1","port":5353}]},"blocks":{"domains":["BLOCK.TEST."],"lists":[{"id":"managed","api_managed":true,"source":{"kind":"file","value":"one.txt"},"format":"domains"}]},"records":[{"name":"Home.Test.","type":"AAAA","ttl":17,"addresses":["2001:db8::1"]}]}
+    , "config", &diagnostic);
+    defer settings.deinit();
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const canonical = try toDocument(arena.allocator(), &settings);
+    try std.testing.expectEqualStrings("key", canonical.api.?.key_file.?);
+    try std.testing.expectEqualStrings("lists", canonical.api.?.file_root.?);
+    try std.testing.expectEqualStrings("block.test", canonical.blocks.domains[0]);
+    try std.testing.expectEqualStrings("home.test", canonical.records[0].name);
+    const json = try std.json.Stringify.valueAlloc(arena.allocator(), canonical, .{ .emit_null_optional_fields = false });
+    var round_trip = try parse(allocator, json, "config", &diagnostic);
+    defer round_trip.deinit();
+    try std.testing.expect(round_trip.definitions.sources.items[0].api_managed);
+    try std.testing.expectEqualStrings("one.txt", round_trip.definitions.sources.items[0].source.value);
+    try std.testing.expectEqualStrings("config/lists", round_trip.definitions.sources.items[0].access.file_root.?);
+    try std.testing.expectEqualStrings("config/key", round_trip.api.?.key_file.?);
+    try std.testing.expectEqual(@as(u32, 17), round_trip.records[0].ttl_seconds);
 }

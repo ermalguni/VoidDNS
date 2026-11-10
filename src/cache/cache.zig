@@ -22,6 +22,22 @@ pub fn deinit(self: *Cache) void {
     log.debug("deinitialized", .{});
 }
 
+/// Runtime mutex must be held by callers while inspecting or clearing slots.
+pub fn occupied(self: *const Cache) usize {
+    var count: usize = 0;
+    for (self.slots) |slot| if (slot != null) {
+        count += 1;
+    };
+    return count;
+}
+
+pub fn clear(self: *Cache) void {
+    for (self.slots) |*slot| {
+        if (slot.*) |entry| entry.deinit(self.allocator);
+        slot.* = null;
+    }
+}
+
 fn slotFor(self: *Cache, k: []const u8) *?Entry {
     return &self.slots[std.hash.Wyhash.hash(0, k) % self.slots.len];
 }

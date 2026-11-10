@@ -30,7 +30,8 @@ pub fn fromDocument(allocator: std.mem.Allocator, document: *const Document) !De
 
     var ids: std.StringHashMapUnmanaged(void) = .empty;
     defer ids.deinit(allocator);
-    for (document.blocks.lists) |source| {
+    for (document.blocks.lists) |definition| {
+        const source = definition.runtime();
         try source.validate();
         if (!std.unicode.utf8ValidateSlice(source.source.value)) return error.InvalidSourceLocation;
         const entry = try ids.getOrPut(allocator, source.id);
