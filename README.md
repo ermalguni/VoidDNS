@@ -25,7 +25,7 @@ Arguments after `--` are forwarded to VoidDNS through the build system's
 
 ## Linux binaries and packages
 
-[Linux binaries and packages](.github/workflows/linux-packages.yml) runs when
+[Linux binaries, packages, and containers](.github/workflows/linux-packages.yml) runs when
 you push a `vX.Y.Z` tag or select **Run workflow** in GitHub Actions and enter
 an `X.Y.Z` version. Only three-component numeric versions are accepted.
 Manual builds default to `0.0.0`; use the intended release version when distributing
@@ -82,6 +82,72 @@ Binding port 53 requires appropriate privileges; use port 5353 for an
 unprivileged smoke test. For the standalone archive, extract it and run
 `./VoidDNS --config /path/to/voiddns.json`; install system CA certificates
 separately if using HTTPS sources.
+
+### Docker images
+
+After the GitHub Release succeeds, the same workflow publishes
+`ghcr.io/<owner>/<repository>:vX.Y.Z` (owner/repository lowercased).
+One multi-platform tag contains `linux/amd64`, `linux/arm64`, and `linux/arm/v7`;
+Docker selects the host architecture automatically. ARMv6 is not supported.
+There is no floating `latest` tag. Rerunning a version replaces its image tag;
+pin an image digest when immutable deployment is required.
+
+The container job alone receives `packages: write`. It reuses the checksummed
+release binaries, smoke-tests each image with `--help` (QEMU for ARM), and pushes
+to GitHub Container Registry using `GITHUB_TOKEN`. GHCR package visibility may
+need to be changed to public for anonymous pulls; private images require
+`docker login ghcr.io`.
+
+The [Dockerfile](Dockerfile) uses Alpine with CA certificates for HTTPS imports,
+runs as UID/GID `65532:65532`, and defaults to
+`--config /config/voiddns.json`. No configuration or credentials are embedded.
+
+Copy both example files into a host directory, then edit `voiddns.json`:
+set `dns.listen.address` to `0.0.0.0` and `dns.listen.port` to `5353`.
+Container loopback is not reachable through Docker's published ports.
+
+```sh
+mkdir -p container-config
+cp examples/voiddns.json examples/blocked-domains.txt container-config/
+# Edit container-config/voiddns.json as described above.
+docker run -d --init --name voiddns \
+  --cap-drop ALL --read-only --tmpfs /tmp \
+  -p 53:5353/udp \
+  --mount type=bind,src="$(pwd)/container-config",dst=/config \
+  ghcr.io/<owner>/<repository>:vX.Y.Z
+```
+
+Replace the image placeholder with your repository and release version.
+The host directory must be traversable and its input files readable by UID
+65532. For API persistence, make the directory and configuration writable by
+that UID: mount the **directory**, not just the JSON file, because saves use
+same-directory temporary files and atomic replacement. API key files must be
+owned by UID 65532 with mode `0600`. For DNS-only use without persistent edits,
+the configuration mount can be read-only.
+
+The API remains disabled in the example. To expose it, configure its listener
+as `0.0.0.0:8080`, enable it with a restricted key file, and add
+`-p 127.0.0.1:8080:8080`; remote access still needs HTTPS termination and network
+controls. DNS currently uses UDP only. Signal-based graceful shutdown is not
+implemented; for cooperative shutdown, start with `-i` and append
+`--config /config/voiddns.json --control-stdin`, then send `quit` through stdin.
+
+To build a native amd64 image locally using Zig 0.17.1 (prefetch dependencies
+as described above):
+
+```sh
+zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-musl -Dcpu=baseline
+docker build --platform linux/amd64 \
+  --build-arg BINARY_PATH=zig-out/bin/VoidDNS -t voiddns:local .
+docker run --rm --platform linux/amd64 voiddns:local --help
+```
+
+For ARM64 use `aarch64-linux-musl`, `baseline`, and `linux/arm64`; for ARMv7
+use `arm-linux-musleabihf`, `generic+v7a`, and `linux/arm/v7`. Running foreign
+images requires QEMU/binfmt support. Without the `BINARY_PATH` override,
+Docker expects prebuilt binaries under `container-bin/amd64/VoidDNS`,
+`container-bin/arm64/VoidDNS`, and `container-bin/armv7/VoidDNS`, as populated
+by the workflow; the Dockerfile does not download a compiler or build Zig.
 
 ## Startup configuration
 

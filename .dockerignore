@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!LICENSE
+!container-bin/
+!container-bin/**
+!zig-out/
+!zig-out/bin/
+!zig-out/bin/VoidDNS
