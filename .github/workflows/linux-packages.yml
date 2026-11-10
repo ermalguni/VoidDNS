@@ -16,8 +16,29 @@ permissions:
   contents: read
 
 jobs:
+  ui:
+    name: Build management UI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build production UI
+        working-directory: ui
+        run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiddns-ui
+          path: ui/dist/
+          if-no-files-found: error
+          retention-days: 30
+
   package:
     name: Linux ${{ matrix.arch }}
+    needs: ui
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -46,6 +67,10 @@ jobs:
       PROJECT_URL: https://github.com/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: voiddns-ui
+          path: ui/dist
 
       - name: Set package version
         id: version
@@ -110,6 +135,8 @@ jobs:
           install -m 755 "$BINARY" staging/VoidDNS
           install -m 644 LICENSE README.md staging/
           install -m 644 examples/voiddns.json examples/blocked-domains.txt staging/examples/
+          cp -R ui/dist staging/ui
+          install -m 644 ui/Caddyfile staging/examples/Caddyfile
           tar -C staging -czf "dist/voiddns_${VERSION}_linux_${ARCH}.tar.gz" .
           for format in deb rpm archlinux; do
             nfpm package --config packaging/nfpm.yaml --packager "$format" --target dist/
@@ -187,6 +214,10 @@ jobs:
       VERSION: ${{ needs.package.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: voiddns-ui
+          path: ui/dist
 
       - name: Set lowercase GHCR image name
         id: image
@@ -223,6 +254,9 @@ jobs:
           for platform in linux/amd64 linux/arm64 linux/arm/v7; do
             docker buildx build --platform "$platform" --load --tag voiddns:smoke .
             docker run --rm --platform "$platform" voiddns:smoke --help
+            docker buildx build --platform "$platform" --load --file ui/Dockerfile --tag voiddns-ui:smoke .
+            docker run --rm --platform "$platform" --cap-drop ALL --read-only --tmpfs /tmp \
+              voiddns-ui:smoke caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           done
 
       - uses: docker/login-action@v3
@@ -240,6 +274,21 @@ jobs:
           tags: ${{ steps.image.outputs.name }}:v${{ env.VERSION }}
           labels: |
             org.opencontainers.image.title=VoidDNS
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Publish versioned multi-platform UI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ui/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.image.outputs.name }}-ui:v${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.title=VoidDNS UI
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.VERSION }}

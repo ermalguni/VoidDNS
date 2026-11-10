@@ -11,6 +11,7 @@ homepage: ${PROJECT_URL}
 license: MIT
 depends:
   - ca-certificates
+  - caddy
 contents:
   - src: zig-out/bin/VoidDNS
     dst: /usr/bin/VoidDNS
@@ -24,3 +25,8 @@ contents:
     dst: /usr/share/doc/voiddns/examples/voiddns.json
   - src: examples/blocked-domains.txt
     dst: /usr/share/doc/voiddns/examples/blocked-domains.txt
+  - src: ui/dist/
+    dst: /usr/share/voiddns/ui/
+    type: tree
+  - src: ui/Caddyfile
+    dst: /usr/share/doc/voiddns/examples/Caddyfile

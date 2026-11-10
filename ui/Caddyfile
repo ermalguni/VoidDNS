@@ -5,7 +5,7 @@ dns.example.com {
         header Cache-Control "no-store"
     }
     handle {
-        root * /srv/voiddns/ui
+        root * /usr/share/voiddns/ui
         try_files {path} /index.html
         file_server
         header Cache-Control "no-cache"

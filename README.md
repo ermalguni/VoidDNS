@@ -41,14 +41,16 @@ produces static assets in `ui/dist/`. `npm run generate` refreshes types alone.
 `npm run preview` is a local build smoke check, not a production server.
 Use a modern browser supporting `Promise.withResolvers`.
 
-For production, copy the **contents** of `ui/dist/` into `/srv/voiddns/ui` and
-adapt [`ui/Caddyfile`](ui/Caddyfile) to your hostname and API address. Serve the
+For production, build `ui/dist/` and copy its **contents** into
+`/usr/share/voiddns/ui`, or install a release package that includes those assets.
+Adapt [`ui/Caddyfile`](ui/Caddyfile) to your hostname and API address. Serve the
 SPA at `/`, route `/api/v1/*` to VoidDNS, and fall back to `index.html` for UI
 routes. Keep the API on loopback or an otherwise restricted network. Remote
 access requires HTTPS and appropriate network controls. The Caddy example
 provides HTTPS termination; no CORS or second application backend is needed.
 Assets are bundled locally, without CDN dependencies. The UI is not embedded
-in the Zig executable or included in the existing OS/container packages.
+in the Zig executable; packages include static assets and Compose uses a Caddy
+sidecar.
 
 The login field accepts any nonempty key without client-side length limits.
 The backend accepts arbitrary key-file contents without length or character
@@ -134,9 +136,10 @@ sudo pacman -U ./voiddns*.pkg.tar.zst
 
 Packages install `/usr/bin/VoidDNS`, documentation, the MIT license, and examples
 under `/usr/share/doc/voiddns/examples/`. They require `ca-certificates` for HTTPS
-blocklist downloads. No service is installed or enabled, and no active
-configuration or API credentials are created or replaced. Copy both example
-files into an operator-owned directory, edit the JSON, and run:
+blocklist downloads and `caddy` for serving the UI; apt, dnf, and pacman install
+these dependencies from configured repositories. VoidDNS installs no service
+and creates or replaces no active configuration or API credentials. Copy both
+example files into an operator-owned directory, edit the JSON, and run:
 
 ```sh
 VoidDNS --config /path/to/voiddns.json
@@ -147,6 +150,17 @@ unprivileged smoke test. For the standalone archive, extract it and run
 `./VoidDNS --config /path/to/voiddns.json`; install system CA certificates
 separately if using HTTPS sources.
 
+All three OS package formats also install compiled UI assets under
+`/usr/share/voiddns/ui/` and a Caddy example at
+`/usr/share/doc/voiddns/examples/Caddyfile`. Adapt that example to your hostname
+and enable the authenticated VoidDNS API on `127.0.0.1:8080`. Caddy remains
+operator-managed: VoidDNS does not activate its example configuration. The
+distribution's Caddy package may enable or start its own default service.
+Archives include the same assets in `ui/` and the configuration in
+`examples/Caddyfile`; install Caddy separately and adjust its root to the
+extracted `ui/` directory.
+Node.js is required only to build assets, not on deployment hosts.
+
 ### Docker images
 
 After the GitHub Release succeeds, the same workflow publishes
@@ -155,6 +169,11 @@ One multi-platform tag contains `linux/amd64`, `linux/arm64`, and `linux/arm/v7`
 Docker selects the host architecture automatically. ARMv6 is not supported.
 There is no floating `latest` tag. Rerunning a version replaces its image tag;
 pin an image digest when immutable deployment is required.
+The matching `ghcr.io/<owner>/<repository>-ui:vX.Y.Z` image serves the UI using
+Caddy on port 8081 for the same platforms. It runs as UID/GID `65532:65532`,
+proxies `/api/v1/*` to `voiddns:8080`, and supports SPA deep links.
+Override `VOIDDNS_API_UPSTREAM` when the backend has another network address.
+No API key is embedded or injected by the proxy; enter your key in the UI.
 
 The container job alone receives `packages: write`. It reuses the checksummed
 release binaries, smoke-tests each image with `--help` (QEMU for ARM), and pushes
@@ -195,8 +214,8 @@ The root `compose.yaml` publishes **host UDP port 53** to container UDP port
 5353, allowing the non-root process to run with all capabilities dropped.
 Host port 53 must be available. TCP DNS is not implemented.
 
-Compose binds the existing `examples` directory directly. Configure its DNS
-listener for container networking before starting:
+Compose binds the existing `examples` directory directly. Configure both
+listeners for container networking and enable the API before starting:
 
 ```sh
 python3 - <<'PY'
@@ -206,6 +225,9 @@ from pathlib import Path
 path = Path("examples/voiddns.json")
 config = json.loads(path.read_text())
 config["dns"]["listen"] = {"address": "0.0.0.0", "port": 5353}
+config["api"] = {**config.get("api", {}), "enabled": True,
+                 "listen": {"address": "0.0.0.0", "port": 8080},
+                 "key_file": "api.key"}
 path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 ```
@@ -213,26 +235,37 @@ PY
 The JSON and `blocked-domains.txt` are mounted together at `/config`, so the
 relative blocklist path resolves correctly. No configuration copy is needed.
 The directory mount preserves atomic saves; API updates will modify the
-files in `examples` directly. Apply the UID 65532 permissions described above
-if enabling persistent API updates.
+files in `examples` directly. Create a private API key (without a trailing
+newline), then give the container access. These commands change ownership of
+the example directory and JSON so API saves can atomically replace it:
 
-Set `VOIDDNS_IMAGE` to your published versioned image or digest, then start:
+```sh
+(umask 077; openssl rand -hex 32 | tr -d '\n' > examples/api.key)
+sudo chown 65532:65532 examples examples/voiddns.json examples/api.key
+sudo chmod 600 examples/api.key
+```
+
+Set both images to matching published versions or digests, then start:
 
 ```sh
 export VOIDDNS_IMAGE=ghcr.io/<owner>/<repository>:vX.Y.Z
+export VOIDDNS_UI_IMAGE=ghcr.io/<owner>/<repository>-ui:vX.Y.Z
 docker compose up -d
 docker compose logs -f voiddns
 ```
 
-Replace the image placeholder before running. For a locally built image,
-use `export VOIDDNS_IMAGE=voiddns:local` instead. The configuration file remains
-operator-owned; Compose does not overwrite it on restart. The API is not
-published by this Compose file.
+Open **http://127.0.0.1:8081** and sign in with the exact contents of `api.key`.
+Only the UI proxy is published on host loopback; the API port is not published.
+Remote access requires an HTTPS reverse proxy and network controls; do not
+expose this plaintext UI port directly to the Internet.
 
-The API remains disabled in the example. To expose it, configure its listener
-as `0.0.0.0:8080`, enable it with a restricted key file, and add
-`-p 127.0.0.1:8080:8080`; remote access still needs HTTPS termination and network
-controls. DNS currently uses UDP only. Signal-based graceful shutdown is not
+Replace both image placeholders before running. For locally built images,
+use `VOIDDNS_IMAGE=voiddns:local` and `VOIDDNS_UI_IMAGE=voiddns-ui:local`.
+The configuration remains operator-owned; Compose does not overwrite it on
+restart. For DNS-only operation, start only `docker compose up -d voiddns`;
+the UI image variable must still be set for Compose interpolation.
+
+DNS currently uses UDP only. Signal-based graceful shutdown is not
 implemented; for cooperative shutdown, start with `-i` and append
 `--config /config/voiddns.json --control-stdin`, then send `quit` through stdin.
 
@@ -244,6 +277,8 @@ zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-musl -Dcpu=baseline
 docker build --platform linux/amd64 \
   --build-arg BINARY_PATH=zig-out/bin/VoidDNS -t voiddns:local .
 docker run --rm --platform linux/amd64 voiddns:local --help
+(cd ui && npm ci && npm run build)
+docker build -f ui/Dockerfile -t voiddns-ui:local .
 ```
 
 For ARM64 use `aarch64-linux-musl`, `baseline`, and `linux/arm64`; for ARMv7
@@ -252,6 +287,9 @@ images requires QEMU/binfmt support. Without the `BINARY_PATH` override,
 Docker expects prebuilt binaries under `container-bin/amd64/VoidDNS`,
 `container-bin/arm64/VoidDNS`, and `container-bin/armv7/VoidDNS`, as populated
 by the workflow; the Dockerfile does not download a compiler or build Zig.
+The UI Dockerfile likewise consumes prebuilt `ui/dist/`. The release workflow
+builds these assets once with Node.js 22 and the npm lockfile, then shares them
+across OS packages, archives, and UI images.
 
 ## Startup configuration
 
