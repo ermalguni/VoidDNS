@@ -23,6 +23,66 @@ zig build run -- --help
 Arguments after `--` are forwarded to VoidDNS through the build system's
 `addPassthruArgs` API. The source and pinned HTTP dependency now target Zig 0.17.
 
+## Linux binaries and packages
+
+[Linux binaries and packages](.github/workflows/linux-packages.yml) runs when
+you push a `vX.Y.Z` tag or select **Run workflow** in GitHub Actions and enter
+an `X.Y.Z` version. Only three-component numeric versions are accepted.
+Manual builds default to `0.0.0`; use the intended release version when distributing
+packages. Each architecture produces a binary `.tar.gz`, Debian `.deb`, Fedora
+`.rpm`, Arch `.pkg.tar.zst`, and `SHA256SUMS-<architecture>`.
+
+| Binary target | Intended systems | Debian | Fedora | Arch / Arch Linux ARM |
+| --- | --- | --- | --- | --- |
+| x86_64 | 64-bit Intel/AMD Linux | amd64 | x86_64 | x86_64 |
+| aarch64 | 64-bit ARM Linux / Raspberry Pi OS | arm64 | aarch64 | aarch64 |
+| armv7 | 32-bit ARMv7 hard-float Linux / Raspberry Pi OS | armhf | armv7hl | armv7h |
+
+Select the architecture of the installed OS, not just the processor. ARMv7
+covers Pi 2 and newer, including Zero 2; original Pi 1 and Pi Zero/Zero W
+ARMv6 systems are not supported. Package generation does not imply that each
+distribution still supports every architecture.
+
+The workflow cross-compiles with Zig 0.17.1, `ReleaseFast`, and generic CPU
+targets, using musl targets to avoid a host glibc dependency. It runs `--help`
+for each binary (under QEMU for ARM), then uses pinned nFPM 2.43.4 to build all
+three package formats from [one manifest](packaging/nfpm.yaml).
+
+After all three builds succeed, the workflow publishes every archive, package,
+and architecture-specific checksum file to the GitHub Release named `vX.Y.Z`.
+A manual run creates that tag at the selected commit if it does not exist;
+if the tag already exists, it must point to the commit being built. Rerunning
+the workflow updates the existing release assets with matching filenames.
+Only the release job receives `contents: write` permission.
+
+Download your architecture's files from the repository's **Releases** page.
+Workflow artifacts are also retained for 30 days; release assets do not have
+that artifact expiration. Download all four files for your architecture and its
+checksum file, then run, for example, `sha256sum -c SHA256SUMS-aarch64`.
+The workflow does not sign packages or upload to distribution repositories.
+Install the appropriate package using one of:
+
+```sh
+sudo apt install ./voiddns_*.deb
+sudo dnf install ./voiddns*.rpm
+sudo pacman -U ./voiddns*.pkg.tar.zst
+```
+
+Packages install `/usr/bin/VoidDNS`, documentation, the MIT license, and examples
+under `/usr/share/doc/voiddns/examples/`. They require `ca-certificates` for HTTPS
+blocklist downloads. No service is installed or enabled, and no active
+configuration or API credentials are created or replaced. Copy both example
+files into an operator-owned directory, edit the JSON, and run:
+
+```sh
+VoidDNS --config /path/to/voiddns.json
+```
+
+Binding port 53 requires appropriate privileges; use port 5353 for an
+unprivileged smoke test. For the standalone archive, extract it and run
+`./VoidDNS --config /path/to/voiddns.json`; install system CA certificates
+separately if using HTTPS sources.
+
 ## Startup configuration
 
 Run with an explicit JSON configuration path:

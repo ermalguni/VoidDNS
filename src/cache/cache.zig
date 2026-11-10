@@ -39,7 +39,7 @@ pub fn clear(self: *Cache) void {
 }
 
 fn slotFor(self: *Cache, k: []const u8) *?Entry {
-    return &self.slots[std.hash.Wyhash.hash(0, k) % self.slots.len];
+    return &self.slots[@intCast(std.hash.Wyhash.hash(0, k) % self.slots.len)];
 }
 
 pub fn get(self: *Cache, query: []const u8, now: i64, out: []u8) ?[]const u8 {

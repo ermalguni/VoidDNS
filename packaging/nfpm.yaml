@@ -1,0 +1,26 @@
+name: voiddns
+arch: ${PACKAGE_ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: net
+priority: optional
+maintainer: Ermal Guni
+description: DNS caching forwarder with in-memory filtering and a management API
+homepage: ${PROJECT_URL}
+license: MIT
+depends:
+  - ca-certificates
+contents:
+  - src: zig-out/bin/VoidDNS
+    dst: /usr/bin/VoidDNS
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/licenses/voiddns/LICENSE
+  - src: README.md
+    dst: /usr/share/doc/voiddns/README.md
+  - src: examples/voiddns.json
+    dst: /usr/share/doc/voiddns/examples/voiddns.json
+  - src: examples/blocked-domains.txt
+    dst: /usr/share/doc/voiddns/examples/blocked-domains.txt

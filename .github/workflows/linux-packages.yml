@@ -1,0 +1,174 @@
+name: Linux binaries and packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (X.Y.Z, without v)'
+        required: true
+        default: '0.0.0'
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-linux-musl
+            cpu: baseline
+            package_arch: amd64
+            emulator: ''
+          - arch: aarch64
+            target: aarch64-linux-musl
+            cpu: baseline
+            package_arch: arm64
+            emulator: qemu-aarch64
+          - arch: armv7
+            target: arm-linux-musleabihf
+            cpu: generic+v7a
+            package_arch: arm7
+            emulator: qemu-arm
+    env:
+      PACKAGE_ARCH: ${{ matrix.package_arch }}
+      BINARY: zig-out/bin/VoidDNS
+      PROJECT_URL: https://github.com/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set package version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Use a version X.Y.Z or a tag vX.Y.Z (no prerelease suffix).'
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.1'
+          cache-key: ${{ matrix.target }}-${{ matrix.cpu }}
+
+      - name: Prefetch pinned transitive dependencies
+        run: |
+          zig fetch git+https://github.com/karlseguin/metrics.zig#ac167295b6a8fd84ca7af852c1032e6b246101f0
+          zig fetch git+https://github.com/karlseguin/websocket.zig#f2b3bad6875595e8dd42c726e8e914885a8b0ba0
+
+      - name: Build optimized binary
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }}
+
+      - name: Install ARM emulator
+        if: matrix.emulator != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-user
+
+      - name: Smoke-test binary
+        env:
+          EMULATOR: ${{ matrix.emulator }}
+        run: |
+          if [[ -n "$EMULATOR" ]]; then
+            "$EMULATOR" "$BINARY" --help
+          else
+            "$BINARY" --help
+          fi
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - name: Install package builder
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.43.4
+
+      - name: Create binary archive and distribution packages
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist staging/examples
+          install -m 755 "$BINARY" staging/VoidDNS
+          install -m 644 LICENSE README.md staging/
+          install -m 644 examples/voiddns.json examples/blocked-domains.txt staging/examples/
+          tar -C staging -czf "dist/voiddns_${VERSION}_linux_${ARCH}.tar.gz" .
+          for format in deb rpm archlinux; do
+            nfpm package --config packaging/nfpm.yaml --packager "$format" --target dist/
+          done
+          (cd dist && sha256sum ./* > "SHA256SUMS-${ARCH}")
+
+      - name: Upload binaries and packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiddns-${{ env.VERSION }}-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-v${{ needs.package.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check existing release tag
+        env:
+          TAG: v${{ needs.package.outputs.version }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            tagged_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+            if [[ "$tagged_commit" != "$(git rev-parse HEAD)" ]]; then
+              echo "Tag $TAG points to a different commit; refusing to publish."
+              exit 1
+            fi
+          fi
+
+      - name: Download all architecture outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voiddns-${{ needs.package.outputs.version }}-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release checksums
+        working-directory: dist
+        run: |
+          for arch in x86_64 aarch64 armv7; do
+            sha256sum -c "SHA256SUMS-$arch"
+          done
+
+      - name: Publish all binaries and packages
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.package.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

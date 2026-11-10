@@ -157,7 +157,7 @@ pub const Management = struct {
         var result: Result = .{ .saved = job.saved, .active = job.failure == null, .durability = job.durability, .revision = self.revision };
         result.resource_id = job.resource_id;
         job.resource_id = null;
-        const slot = &self.history[job.id % self.history.len];
+        const slot = &self.history[@intCast(job.id % self.history.len)];
         if (slot.*) |old| if (old.result) |old_result| if (old_result.resource_id) |id| self.allocator.free(id);
         slot.* = .{ .id = job.id, .status = if (job.failure == null) .succeeded else .failed, .result = result, .@"error" = if (job.failure) |err| @errorName(err) else null };
         if (job.failure) |err| std.log.err("management operation={d} failed saved={} active=false: {s}", .{ job.id, job.saved, @errorName(err) });
@@ -289,7 +289,7 @@ pub const Management = struct {
             if (!get) return failure(a, 405, "MethodNotAllowed", self.revision);
             const id = std.fmt.parseInt(u64, path[11..], 10) catch return failure(a, 404, "OperationNotFound", self.revision);
             if (self.job) |job| if (job.id == id) return json(a, 200, Operation{ .id = id, .status = .running }, self.revision);
-            if (self.history[id % self.history.len]) |operation| if (operation.id == id) return json(a, 200, operation, self.revision);
+            if (self.history[@intCast(id % self.history.len)]) |operation| if (operation.id == id) return json(a, 200, operation, self.revision);
             return failure(a, 404, "OperationNotFound", self.revision);
         }
         if (eq(path, "status")) {
