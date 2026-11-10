@@ -625,7 +625,7 @@ fn strictShape(comptime T: type, value: std.json.Value) !void {
         },
         .@"struct" => |structure| {
             if (value != .object) return error.InvalidJsonType;
-            inline for (structure.fields) |field| if (value.object.get(field.name)) |child| try strictShape(field.type, child);
+            inline for (structure.field_names, structure.field_types) |field_name, FieldType| if (value.object.get(field_name)) |child| try strictShape(FieldType, child);
         },
         else => {},
     }

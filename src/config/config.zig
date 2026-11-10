@@ -899,7 +899,7 @@ test "records enforce input address count before deduplication" {
         .records = &.{.{ .name = "host.test", .type = .A, .addresses = &.{} }},
     };
     try expectInvalidRecords(&document, "records[0].addresses");
-    const literals = [_][]const u8{"192.0.2.1"} ** 17;
+    const literals: [17][]const u8 = @splat("192.0.2.1");
     document.records = &.{.{ .name = "host.test", .type = .A, .addresses = literals[0..16] }};
     var diagnostic: Diagnostic = .{};
     var config = try fromDocument(std.testing.allocator, &document, ".", &diagnostic);

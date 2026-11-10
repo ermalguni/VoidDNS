@@ -149,11 +149,11 @@ const Contract = struct {
                         .string, .allocated_string => |text| text,
                         else => return error.SyntaxError,
                     };
-                    inline for (structure.fields) |field| {
-                        if (std.mem.eql(u8, key, field.name)) {
+                    inline for (structure.field_names, structure.field_types) |field_name, FieldType| {
+                        if (std.mem.eql(u8, key, field_name)) {
                             var buffer: [256]u8 = undefined;
-                            const child_path = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ path, if (path.len == 0) "" else ".", field.name });
-                            try self.check(field.type, child_path);
+                            const child_path = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ path, if (path.len == 0) "" else ".", field_name });
+                            try self.check(FieldType, child_path);
                             break;
                         }
                     } else try self.scanner.skipValue();

@@ -58,9 +58,9 @@ test "canonical names and invalid syntax" {
     for ([_][]const u8{ "", ".", "a..b", "-a.test", "a-.test", "*.test", "a b", "a/b", "a..", "127.0.0.1", "::1", "caf\xc3\xa9.test" }) |invalid| {
         try std.testing.expectError(error.InvalidDomain, normalize(invalid, &buffer));
     }
-    const long_label = [_]u8{'a'} ** 64;
+    const long_label: [64]u8 = @splat('a');
     try std.testing.expectError(error.InvalidDomain, normalize(&long_label, &buffer));
-    const longest = ([_]u8{'a'} ** 63) ++ "." ++ ([_]u8{'b'} ** 63) ++ "." ++ ([_]u8{'c'} ** 63) ++ "." ++ ([_]u8{'d'} ** 61);
+    const longest = @as([63]u8, @splat('a')) ++ "." ++ @as([63]u8, @splat('b')) ++ "." ++ @as([63]u8, @splat('c')) ++ "." ++ @as([61]u8, @splat('d'));
     try std.testing.expectEqual(@as(usize, 253), (try normalize(longest, &buffer)).len);
 }
 

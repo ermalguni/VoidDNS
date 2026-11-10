@@ -48,11 +48,22 @@ fn exchange(
 
     const query_id = decode.id(query);
     log.debug("forwarding id={d} to={f} bytes={d}", .{ query_id, upstream, query.len });
-    errdefer |err| {
+    return exchangeResponse(io, upstream, response_timeout, query, buffer, query_id) catch |err| {
         if (err != error.Canceled) log.warn("forwarding failed id={d} to={f}: {s}", .{
             query_id, upstream, @errorName(err),
         });
-    }
+        return err;
+    };
+}
+
+fn exchangeResponse(
+    io: Io,
+    upstream: net.IpAddress,
+    response_timeout: Io.Clock.Duration,
+    query: []const u8,
+    buffer: []u8,
+    query_id: u16,
+) ![]const u8 {
     const local = try net.IpAddress.parseIp4("0.0.0.0", automatic_port);
     const socket = try local.bind(io, .{
         .mode = .dgram,

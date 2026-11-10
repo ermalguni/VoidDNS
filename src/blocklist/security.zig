@@ -31,7 +31,8 @@ pub fn validateApiSources(allocator: std.mem.Allocator, io: std.Io, candidate: *
             .url => {
                 const uri = try std.Uri.parse(source.source.value);
                 var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-                var host = try uri.getHost(&host_buffer);
+                const component = uri.host orelse return error.UriMissingHost;
+                var host: std.Io.net.HostName = .{ .bytes = try component.toRaw(&host_buffer) };
                 if (host.bytes.len >= 2 and host.bytes[0] == '[' and host.bytes[host.bytes.len - 1] == ']')
                     host.bytes = host.bytes[1 .. host.bytes.len - 1];
                 if (std.Io.net.IpAddress.parse(host.bytes, uri.port orelse 80)) |ip| {

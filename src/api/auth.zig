@@ -50,7 +50,7 @@ test "authentication loads one key and compares digests" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const key = "0123456789abcdef" ** 4;
+    const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     try tmp.dir.writeFile(io, .{
         .sub_path = "key",
         .data = key ++ "\r\n",
@@ -62,13 +62,13 @@ test "authentication loads one key and compares digests" {
     defer auth.deinit();
     try std.testing.expect(auth.verify(key));
     try std.testing.expect(!auth.verify(key ++ "\n"));
-    try std.testing.expect(!auth.verify("1123456789abcdef" ++ "0123456789abcdef" ** 3));
+    try std.testing.expect(!auth.verify("1123456789abcdef" ++ key[16..]));
     try std.testing.expect(!auth.verify(""));
     try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = key ++ "\nsecond" });
     try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = "z" ** 64 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = &@as([64]u8, @splat('z')) });
     try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = "a" ** 63 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "key", .data = &@as([63]u8, @splat('a')) });
     try std.testing.expectError(error.InvalidApiKeyFile, Auth.load(allocator, io, path));
     if (@hasDecl(std.Io.File.Permissions, "fromMode")) {
         const file = try tmp.dir.openFile(io, "key", .{});

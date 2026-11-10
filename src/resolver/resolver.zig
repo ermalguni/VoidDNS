@@ -99,7 +99,7 @@ fn blockedAnswer(question: *const message.Question, buffer: []u8) ![]const u8 {
     if (question.qclass != .internet) return encode.nodata(question, buffer);
     return switch (question.qtype) {
         .a => encode.address(question, &.{ 0, 0, 0, 0 }, 0, buffer),
-        .aaaa => encode.address(question, &([_]u8{0} ** 16), 0, buffer),
+        .aaaa => encode.address(question, &@as([16]u8, @splat(0)), 0, buffer),
         else => encode.nodata(question, buffer),
     };
 }
@@ -131,7 +131,7 @@ test "explicit blocks override allows and local records with zero TTL sinkholes 
     var upstreams = try UpstreamPool.init(&addresses, 3000);
     const records = [_]Record{
         .{ .name = "home.test", .addresses = .{ .a = &.{.{ 192, 0, 2, 10 }} } },
-        .{ .name = "home.test", .addresses = .{ .aaaa = &.{[_]u8{1} ** 16} } },
+        .{ .name = "home.test", .addresses = .{ .aaaa = &.{@splat(1)} } },
     };
     state.records = &records;
     const cases = [_]struct { qtype: u16, qclass: u16, data_len: usize }{
@@ -163,7 +163,7 @@ test "explicit blocks override allows and local records with zero TTL sinkholes 
             try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, response[6..8], .big));
             try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, response[test_query.len + 6 ..][0..4], .big));
             try std.testing.expectEqual(case.data_len, std.mem.readInt(u16, response[test_query.len + 10 ..][0..2], .big));
-            const zeroes = [_]u8{0} ** 16;
+            const zeroes: [16]u8 = @splat(0);
             try std.testing.expectEqualSlices(u8, zeroes[0..case.data_len], response[test_query.len + 12 ..]);
         }
     }
@@ -294,7 +294,7 @@ test "local RRsets return every address in order with shared TTL and matching fa
         .{
             .name = "home.test",
             .ttl_seconds = 12345,
-            .addresses = .{ .aaaa = &.{ [_]u8{1} ** 16, [_]u8{2} ** 16 } },
+            .addresses = .{ .aaaa = &.{ @splat(1), @splat(2) } },
         },
     };
     state.records = &records;
@@ -328,9 +328,9 @@ test "local RRsets return every address in order with shared TTL and matching fa
 }
 
 test "local RRsets truncate atomically at legacy EDNS and output buffer limits" {
-    const long_name = "a" ** 63 ++ "." ++ "b" ** 63 ++ "." ++ "c" ** 63 ++ "." ++ "d" ** 61;
+    const long_name = @as([63]u8, @splat('a')) ++ "." ++ @as([63]u8, @splat('b')) ++ "." ++ @as([63]u8, @splat('c')) ++ "." ++ @as([61]u8, @splat('d'));
     const long_question = "\x12\x34\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00" ++
-        "\x3f" ++ "a" ** 63 ++ "\x3f" ++ "b" ** 63 ++ "\x3f" ++ "c" ** 63 ++ "\x3d" ++ "d" ** 61 ++
+        "\x3f" ++ @as([63]u8, @splat('a')) ++ "\x3f" ++ @as([63]u8, @splat('b')) ++ "\x3f" ++ @as([63]u8, @splat('c')) ++ "\x3d" ++ @as([61]u8, @splat('d')) ++
         "\x00\x00\x01\x00\x01";
     var state = State.init(std.testing.allocator);
     defer state.deinit();
@@ -342,7 +342,7 @@ test "local RRsets truncate atomically at legacy EDNS and output buffer limits" 
     var ipv6: [16][16]u8 = undefined;
     for (&ipv4, &ipv6, 0..) |*a, *aaaa, i| {
         a.* = .{ 192, 0, 2, @intCast(i + 1) };
-        aaaa.* = [_]u8{0} ** 16;
+        aaaa.* = @splat(0);
         aaaa[15] = @intCast(i + 1);
     }
     const records = [_]Record{
@@ -406,7 +406,7 @@ test "missing local address family falls through policy without suppressing bloc
     try importTestNames(&state);
     const blocked = (try managedAnswer(&query, &buffer, &state)).?;
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, blocked[6..8], .big));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), blocked[blocked.len - 16 ..]);
+    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0)), blocked[blocked.len - 16 ..]);
     try state.domains.allow("home.test");
     try std.testing.expectEqual(@as(?[]const u8, null), try managedAnswer(&query, &buffer, &state));
     try state.domains.block("home.test");

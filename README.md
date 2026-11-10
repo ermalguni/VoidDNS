@@ -1,5 +1,28 @@
 # VoidDNS
 
+## Building
+
+Use Zig 0.17.1 and a matching ZLS version for editor diagnostics.
+
+On a fresh dependency cache, prefetch the pinned transitive packages through Git:
+
+```sh
+zig fetch git+https://github.com/karlseguin/metrics.zig#ac167295b6a8fd84ca7af852c1032e6b246101f0
+zig fetch git+https://github.com/karlseguin/websocket.zig#f2b3bad6875595e8dd42c726e8e914885a8b0ba0
+```
+
+This avoids the nested-root archive-cache/hash mismatch observed with this
+Zig 0.17.1 installation and GitHub tarballs. Then build and test:
+
+```sh
+zig build
+zig build test
+zig build run -- --help
+```
+
+Arguments after `--` are forwarded to VoidDNS through the build system's
+`addPassthruArgs` API. The source and pinned HTTP dependency now target Zig 0.17.
+
 ## Startup configuration
 
 Run with an explicit JSON configuration path:
@@ -73,7 +96,7 @@ Colocated configuration tests run through `zig build test`.
 
 `main.zig` owns one manager, the active configuration, managed RAM state, and a
 long-lived DNS worker. Configuration snapshots and worker resources have separate
-lifetimes. The DNS loop uses a concurrent task on Zig 0.16's threaded I/O backend;
+lifetimes. The DNS loop uses a concurrent task on Zig 0.17's threaded I/O backend;
 cancellation wakes blocked I/O and joins the worker before shutdown or listener
 replacement. No thread is forcibly terminated.
 
@@ -452,8 +475,8 @@ and formatting for logging are skipped at runtime.
 
 ## Management API
 
-The embedded server uses `karlseguin/http.zig`, pinned to Zig 0.16-compatible
-revision `9b14af98fde5e98abb9a8376fe02b42003e835bf`. Omit `api` or set
+The embedded server uses `karlseguin/http.zig`, pinned to Zig 0.17-compatible
+revision `1bb71ff128a044b1645df91046473c38abbf965c`. Omit `api` or set
 `api.enabled` to `false` to disable it. The example leaves it disabled.
 
 Generate a key in the configuration directory:

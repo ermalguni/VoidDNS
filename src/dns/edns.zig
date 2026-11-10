@@ -163,7 +163,7 @@ test "non-final OPT uses padding without moving compressed records" {
     buffer[2] &= 0x7f;
     const result = try stripCookies(buffer[0 .. packet.len + address.len], &buffer);
     try std.testing.expectEqualSlices(u8, address, result.packet[packet.len..]);
-    try std.testing.expectEqualSlices(u8, "\x00\x0c\x00\x08" ++ "\x00" ** 8, result.packet[38..packet.len]);
+    try std.testing.expectEqualSlices(u8, "\x00\x0c\x00\x08" ++ @as([8]u8, @splat(0)), result.packet[38..packet.len]);
     var cursor = packet.len;
     const owner = try Name.read(result.packet, &cursor);
     try std.testing.expect(owner.matches("home.test"));
@@ -189,7 +189,7 @@ test "response cookies are stripped without changing compressed answers or TTLs"
     const answer = "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\x00\x02\x01";
     try writer.writeAll(answer);
     try writer.writeAll("\x00\x00\x29\x04\xd0\x00\x00\x00\x00\x00\x1c");
-    try writer.writeAll("\x00\x0a\x00\x18abcdefgh" ++ "s" ** 16);
+    try writer.writeAll("\x00\x0a\x00\x18abcdefgh" ++ @as([16]u8, @splat('s')));
     const packet = writer.buffered();
     const result = try stripCookies(packet, &output);
     try std.testing.expectEqual(@as(usize, 1), result.cookies_removed);
