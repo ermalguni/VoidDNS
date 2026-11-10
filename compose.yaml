@@ -1,0 +1,19 @@
+services:
+  voiddns:
+    image: ${VOIDDNS_IMAGE:?Set VOIDDNS_IMAGE to a versioned VoidDNS image or digest}
+    init: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "53:5353/udp"
+    volumes:
+      - type: bind
+        source: ./examples
+        target: /config
+        bind:
+          create_host_path: false
+    command: ["--config", "/config/voiddns.json"]

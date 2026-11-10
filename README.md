@@ -1,5 +1,69 @@
 # VoidDNS
 
+## Web management UI
+
+`ui/` contains the React + TypeScript management application, using Vite,
+Mantine, React Router, and TanStack Query. It supports overview/cache clearing,
+domain rules, local A/AAAA record sets, blocklist CRUD and refresh, runtime
+settings, complete configuration validation/replacement/reload, and policy checks.
+The UI uses the existing authenticated API; no DNS-path or Zig backend changes
+are required.
+
+The configuration editor uses Mantine `JsonInput` with two-space indentation on
+load and blur, plus inline JSON syntax errors. Active-state review panels are
+indented too. Formatting changes whitespace only: large integers, numeric
+notation, duplicate keys, and string escapes remain intact for server validation.
+Invalid drafts remain untouched.
+
+Enable the [management API](#management-api) first and keep its restricted key
+file outside the frontend directory. With Node.js 22.12+ (or a newer supported
+Node release) and npm:
+
+```sh
+cd ui
+npm ci
+npm run dev
+```
+
+Open the local Vite URL and enter the existing administrator API key. The dev
+server binds to loopback and proxies `/api/v1` to `http://127.0.0.1:8080`.
+For a different backend, start it with
+`VOID_DNS_API=http://127.0.0.1:18080 npm run dev`. This variable configures only
+the development/preview proxy; it is not embedded into browser assets.
+Never put credentials in a `VITE_*` variable or committed source.
+
+```sh
+npm run build
+```
+
+This regenerates API types from `src/api/openapi.json`, checks TypeScript, and
+produces static assets in `ui/dist/`. `npm run generate` refreshes types alone.
+`npm run preview` is a local build smoke check, not a production server.
+Use a modern browser supporting `Promise.withResolvers`.
+
+For production, copy the **contents** of `ui/dist/` into `/srv/voiddns/ui` and
+adapt [`ui/Caddyfile`](ui/Caddyfile) to your hostname and API address. Serve the
+SPA at `/`, route `/api/v1/*` to VoidDNS, and fall back to `index.html` for UI
+routes. Keep the API on loopback or an otherwise restricted network. Remote
+access requires HTTPS and appropriate network controls. The Caddy example
+provides HTTPS termination; no CORS or second application backend is needed.
+Assets are bundled locally, without CDN dependencies. The UI is not embedded
+in the Zig executable or included in the existing OS/container packages.
+
+The login field accepts any nonempty key without client-side length limits.
+The backend accepts arbitrary key-file contents without length or character
+restrictions; HTTP header rules still constrain keys sent by clients.
+
+The API key stays in tab memory, not browser storage; reloading or signing out
+clears the UI session. Only the theme preference is stored locally. Signing out
+does not cancel accepted server operations. Writes are never automatically
+retried: the UI polls accepted operations and reports saved, active, and
+durability results. A failed activation can leave disk and runtime different.
+Conflicts preserve editor drafts and require explicit current-state review;
+expired pagination cursors restart the listing. If polling is interrupted, use
+**Resume operation polling** before another write; after a server restart,
+sign out and reconnect because operation IDs and revisions are process-local.
+
 ## Building
 
 Use Zig 0.17.1 and a matching ZLS version for editor diagnostics.
@@ -125,6 +189,46 @@ same-directory temporary files and atomic replacement. API key files must be
 owned by UID 65532 with mode `0600`. For DNS-only use without persistent edits,
 the configuration mount can be read-only.
 
+#### Docker Compose
+
+The root `compose.yaml` publishes **host UDP port 53** to container UDP port
+5353, allowing the non-root process to run with all capabilities dropped.
+Host port 53 must be available. TCP DNS is not implemented.
+
+Compose binds the existing `examples` directory directly. Configure its DNS
+listener for container networking before starting:
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("examples/voiddns.json")
+config = json.loads(path.read_text())
+config["dns"]["listen"] = {"address": "0.0.0.0", "port": 5353}
+path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+```
+
+The JSON and `blocked-domains.txt` are mounted together at `/config`, so the
+relative blocklist path resolves correctly. No configuration copy is needed.
+The directory mount preserves atomic saves; API updates will modify the
+files in `examples` directly. Apply the UID 65532 permissions described above
+if enabling persistent API updates.
+
+Set `VOIDDNS_IMAGE` to your published versioned image or digest, then start:
+
+```sh
+export VOIDDNS_IMAGE=ghcr.io/<owner>/<repository>:vX.Y.Z
+docker compose up -d
+docker compose logs -f voiddns
+```
+
+Replace the image placeholder before running. For a locally built image,
+use `export VOIDDNS_IMAGE=voiddns:local` instead. The configuration file remains
+operator-owned; Compose does not overwrite it on restart. The API is not
+published by this Compose file.
+
 The API remains disabled in the example. To expose it, configure its listener
 as `0.0.0.0:8080`, enable it with a restricted key file, and add
 `-p 127.0.0.1:8080:8080`; remote access still needs HTTPS termination and network
@@ -182,7 +286,7 @@ are required. Optional sections and fields use the following defaults:
 | `api` | Omitted / disabled | Optional management HTTP configuration |
 | `api.enabled` | `true` when `api` is present | Boolean |
 | `api.listen.address`, `api.listen.port` | `"127.0.0.1"`, `8080` | IPv4 literal and port 1–65535 |
-| `api.key_file` | Required when enabled | Restricted file containing a 64-character hexadecimal API key |
+| `api.key_file` | Required when enabled | Restricted file containing the exact API key bytes |
 | `api.file_root` | Omitted | Root for API-managed relative file sources; omission denies them |
 | `api.allow_private_sources` | `false` | Explicitly permit private-network API URL sources |
 
@@ -633,7 +737,7 @@ revision `1bb71ff128a044b1645df91046473c38abbf965c`. Omit `api` or set
 Generate a key in the configuration directory:
 
 ```sh
-(umask 077; openssl rand -hex 32 > examples/api.key)
+(umask 077; openssl rand -hex 32 | tr -d '\n' > examples/api.key)
 ```
 
 Then enable the example's `api` section, or add:
@@ -648,11 +752,15 @@ Then enable the example's `api` section, or add:
 ```
 
 `key_file` and `file_root` resolve relative to the configuration directory.
-The key must contain exactly 64 hexadecimal characters, optionally followed by
-LF or CRLF; comparison is case-sensitive. On POSIX, group/other permission bits
-must be zero. The server retains only a SHA-256 digest and erases the key's
-temporary read buffer. Send exactly one `X-API-Key` header. Missing, duplicate,
-or incorrect keys return `401`; all keys have administrator privileges.
+The key is the file's exact contents: no length or character restrictions, and
+no whitespace or newline trimming. Empty keys are accepted but insecure; use a
+strong random key. HTTP header syntax and server header-size limits still apply,
+so use header-safe text without a trailing newline. Comparison is case-sensitive.
+On POSIX, group/other permission bits must be zero. The server streams the file
+through SHA-256 with a fixed-size buffer, erases temporary plaintext and hash
+state, and retains only the digest. Send exactly one `X-API-Key` header.
+Missing, duplicate, or incorrect keys return `401`; all keys have administrator
+privileges.
 
 API configuration and key rotation require a restart. Live configuration
 updates that change the API settings are rejected before saving. No built-in
