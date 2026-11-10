@@ -3,3 +3,5 @@ zig-out/
 zig-pkg/
 *.o
 examples/api.key
+ui/node_modules/
+ui/dist/

@@ -1,0 +1,10 @@
+:root { font-synthesis: none; text-rendering: optimizeLegibility; }
+body { margin: 0; }
+.eyebrow { letter-spacing: .13em; font-size: .72rem; font-weight: 700; color: var(--mantine-color-teal-7); }
+.mantine-AppShell-main { background: var(--mantine-color-body); }
+.mantine-AppShell-header { border-bottom-color: var(--mantine-color-default-border); }
+.mantine-Table-td { overflow-wrap: anywhere; }
+.mantine-Alert-message { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 48em) { .mantine-AppShell-main { padding-inline: 12px; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

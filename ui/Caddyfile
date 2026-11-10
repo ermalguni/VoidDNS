@@ -1,0 +1,16 @@
+# Replace the hostname and asset path before deployment. Caddy manages HTTPS.
+dns.example.com {
+    handle /api/v1/* {
+        reverse_proxy 127.0.0.1:8080
+        header Cache-Control "no-store"
+    }
+    handle {
+        root * /srv/voiddns/ui
+        try_files {path} /index.html
+        file_server
+        header Cache-Control "no-cache"
+        header X-Content-Type-Options "nosniff"
+        header Referrer-Policy "no-referrer"
+        header X-Frame-Options "DENY"
+    }
+}
