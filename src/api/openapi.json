@@ -3,7 +3,7 @@
   "info": {
     "title": "VoidDNS management API",
     "version": "1.0.0",
-    "description": "Configuration-backed single-server management. DNS caches and imported contents remain RAM-only. No query telemetry or peer synchronization. All endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API transport settings require restart. Mutations require quoted If-Match and persistent mutations complete asynchronously."
+    "description": "Configuration-backed single-server management with an embedded public UI and authenticated API on one HTTP listener. DNS caches and imported contents remain RAM-only. No query telemetry or peer synchronization. All API endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API and UI settings, including the shared HTTP listener, require restart; live changes are rejected before saving or publication. Mutations require quoted If-Match and persistent mutations complete asynchronously."
   },
   "servers": [
     {
@@ -247,7 +247,7 @@
             }
           }
         },
-        "description": "Preserves explicit rules, records, sources and restart-only API configuration.",
+        "description": "Preserves explicit rules, records, sources and restart-only API and UI configuration.",
         "requestBody": {
           "required": true,
           "content": {
@@ -423,7 +423,7 @@
             }
           }
         },
-        "description": "Saved and active outcomes are distinct. An activation failure can leave the previous runtime active and the candidate on disk. API transport settings are restart-only.",
+        "description": "Saved and active outcomes are distinct. An activation failure can leave the previous runtime active and the candidate on disk. API and UI settings, including the shared HTTP listener, are restart-only; changes are rejected before saving or publication.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3346,6 +3346,7 @@
       },
       "ApiSettings": {
         "type": "object",
+        "description": "Required non-null API configuration. Enabled defaults to true. The API and embedded UI share api.listen (default 127.0.0.1:8080). Changes require restart and are rejected by live replacement or reload before saving or publication.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -3387,6 +3388,17 @@
             }
           }
         ]
+      },
+      "UiSettings": {
+        "type": "object",
+        "description": "Required non-null embedded UI configuration. Enabled defaults to true and requires api.enabled to be true. UI assets are public; API endpoints always require authentication. Changes require restart and are rejected by live replacement or reload before saving or publication.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
       },
       "Source": {
         "type": "object",
@@ -3523,9 +3535,10 @@
       },
       "Config": {
         "type": "object",
+        "description": "Only schema_version 2 is supported. Non-null api and ui objects are required; enabled defaults to true in each. API/UI true/true serves the public embedded UI and authenticated API; true/false serves API only with frontend routes returning 404; false/false is DNS-only with no HTTP listener; false/true is invalid. API/UI settings and the shared HTTP listener require restart; live changes are rejected before saving or publication.",
         "properties": {
           "schema_version": {
-            "const": 1
+            "const": 2
           },
           "dns": {
             "$ref": "#/components/schemas/Dns"
@@ -3541,6 +3554,9 @@
           },
           "api": {
             "$ref": "#/components/schemas/ApiSettings"
+          },
+          "ui": {
+            "$ref": "#/components/schemas/UiSettings"
           },
           "records": {
             "type": "array",
@@ -3583,7 +3599,33 @@
         },
         "required": [
           "schema_version",
-          "upstream"
+          "upstream",
+          "api",
+          "ui"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "api": {
+                  "properties": {
+                    "enabled": { "const": false }
+                  },
+                  "required": ["enabled"]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "ui": {
+                  "properties": {
+                    "enabled": { "const": false }
+                  },
+                  "required": ["enabled"]
+                }
+              }
+            }
+          }
         ],
         "additionalProperties": false
       },

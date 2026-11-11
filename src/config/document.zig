@@ -6,7 +6,7 @@ const Source = @import("../blocklist/source.zig").Source;
 /// constructed documents may borrow data until converted with fromDocument.
 pub const Document = struct {
     schema_version: u32,
-    api: ?struct {
+    api: struct {
         enabled: bool = true,
         listen: struct {
             address: []const u8 = "127.0.0.1",
@@ -15,7 +15,8 @@ pub const Document = struct {
         key_file: ?[]const u8 = null,
         file_root: ?[]const u8 = null,
         allow_private_sources: bool = false,
-    } = null,
+    },
+    ui: config.Ui,
     dns: struct {
         listen: struct {
             address: []const u8 = "127.0.0.1",
@@ -140,8 +141,9 @@ const Contract = struct {
                 _ = try self.scanner.next();
             },
             .@"struct" => |structure| {
-                if (token_type != .object_begin) return self.scanner.skipValue();
+                if (token_type != .object_begin) return self.invalid(path, "expected a JSON object");
                 _ = try self.scanner.next();
+                var seen: [structure.field_names.len]bool = @splat(false);
                 while (try self.scanner.peekNextTokenType() != .object_end) {
                     const token = try self.scanner.nextAlloc(self.allocator, .alloc_if_needed);
                     defer self.freeToken(token);
@@ -149,8 +151,10 @@ const Contract = struct {
                         .string, .allocated_string => |text| text,
                         else => return error.SyntaxError,
                     };
-                    inline for (structure.field_names, structure.field_types) |field_name, FieldType| {
+                    inline for (structure.field_names, structure.field_types, 0..) |field_name, FieldType, index| {
                         if (std.mem.eql(u8, key, field_name)) {
+                            if (seen[index]) return error.DuplicateField;
+                            seen[index] = true;
                             var buffer: [256]u8 = undefined;
                             const child_path = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ path, if (path.len == 0) "" else ".", field_name });
                             try self.check(FieldType, child_path);
@@ -159,6 +163,12 @@ const Contract = struct {
                     } else try self.scanner.skipValue();
                 }
                 _ = try self.scanner.next();
+                if (T == Document) {
+                    inline for (structure.field_names, 0..) |field_name, index| {
+                        if ((comptime std.mem.eql(u8, field_name, "api") or std.mem.eql(u8, field_name, "ui")) and !seen[index])
+                            return self.invalid(field_name, "required object is missing");
+                    }
+                }
             },
             else => try self.scanner.skipValue(),
         }

@@ -20,6 +20,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).module("httpz");
+
+    // Assets are built by npm before Zig runs. Always regenerate: additions,
+    // removals and missing dist directories must never reuse a stale manifest.
+    const embed_ui = b.addSystemCommand(&.{"node"});
+    embed_ui.addFileArg(b.path("ui/embed.mjs"));
+    embed_ui.addDirectoryArg(b.path("ui/dist"));
+    const ui_assets = embed_ui.addOutputFileArg("ui_assets.zig");
+    embed_ui.has_side_effects = true;
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -86,6 +94,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "httpz", .module = httpz },
             },
         }),
+    });
+    exe.root_module.addAnonymousImport("ui_assets", .{
+        .root_source_file = ui_assets,
+        .target = target,
+        .optimize = optimize,
     });
 
     // This declares intent for the executable to be installed into the

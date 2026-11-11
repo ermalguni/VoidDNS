@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+if [ "${1:-}" = configure ]; then
+    if [ -z "${2:-}" ]; then action=install; else action=upgrade; fi
+    /usr/lib/voiddns/package-setup "$action" debian
+fi

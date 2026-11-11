@@ -78,6 +78,7 @@ pub const Management = struct {
             }
             const candidate = &self.candidate.?;
             if (!try sameApi(owner.allocator, owner.settings, candidate)) return error.ApiRestartRequired;
+            if (owner.settings.ui.enabled != candidate.ui.enabled) return error.UiRestartRequired;
             if (self.api) try security.validateApiSources(owner.allocator, owner.io, candidate, owner.settings);
             if (self.kind == .save) {
                 var arena = std.heap.ArenaAllocator.init(owner.allocator);
@@ -397,6 +398,11 @@ pub const Management = struct {
             owned = false;
             return failure(a, 409, "ApiRestartRequired", self.revision);
         }
+        if (self.settings.ui.enabled != candidate.ui.enabled) {
+            candidate.deinit();
+            owned = false;
+            return failure(a, 409, "UiRestartRequired", self.revision);
+        }
         const owned_resource = if (resource) |id| try self.allocator.dupe(u8, id) else null;
         errdefer if (owned) {
             if (owned_resource) |id| self.allocator.free(id);
@@ -420,7 +426,7 @@ pub const Management = struct {
         defer self.state.mutex.unlock(self.io);
         var local = false;
         for (self.state.records) |record| if (eq(record.name, name)) {
-            if (@intFromEnum(record.recordType()) == qtype) local = true;
+            if (@backingInt(record.recordType()) == qtype) local = true;
         };
         const explicit_block = self.state.domains.isBlocked(name);
         const explicit_allow = self.state.domains.isAllowed(name);
@@ -685,7 +691,7 @@ test "management policy matches record family and collections enforce revision c
     const io = std.testing.io;
     var diagnostic: config.Diagnostic = .{};
     var settings = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"HOME.test.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["z.test","a.test"]},"allows":{"domains":["allow.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"HOME.test.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["z.test","a.test"]},"allows":{"domains":["allow.test"]}}
     , ".", &diagnostic);
     defer settings.deinit();
     var state = try settings.prepareState(io, &diagnostic);
@@ -733,7 +739,7 @@ test "management policy matches record family and collections enforce revision c
     request.path = "/api/v1/config/validate";
     request.if_match = null;
     request.body =
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"blocks":{"lists":[{"id":"unread","source":{"kind":"file","value":"does-not-exist"},"format":"domains"}]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"blocks":{"lists":[{"id":"unread","source":{"kind":"file","value":"does-not-exist"},"format":"domains"}]}}
     ;
     try std.testing.expectEqual(@as(u16, 200), (try management.handle(a, request)).status);
     try state.lists.add(io, .{
@@ -759,4 +765,52 @@ test "management policy matches record family and collections enforce revision c
     management.complete();
     try std.testing.expect(management.history[2].?.status == .failed);
     try std.testing.expectEqual(@as(u64, 4), management.history[2].?.result.?.revision);
+}
+
+test "restart-required HTTP updates preserve saved bytes before API and stdin save preparation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const original =
+        \\{"schema_version":2,"api":{"key_file":"key"},"ui":{},"upstream":{"servers":[{"address":"127.0.0.1"}]}}
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = original });
+    const path = try tmp.dir.realPathFileAlloc(io, "config.json", allocator);
+    defer allocator.free(path);
+    var manager = try Manager.init(allocator, path);
+    defer manager.deinit();
+    var diagnostic: config.Diagnostic = .{};
+    var settings = try manager.load(io, &diagnostic);
+    defer settings.deinit();
+    // Rejection must happen before touching runtime state, worker, or mailbox.
+    var owner: Management = undefined;
+    owner.allocator = allocator;
+    owner.io = io;
+    owner.manager = &manager;
+    owner.settings = &settings;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const active = try config.toDocument(arena.allocator(), &settings);
+    for ([_]bool{ true, false }) |api_request| {
+        for ([_]bool{ true, false }) |change_api| {
+            var replacement = active;
+            if (change_api) replacement.api.listen.port += 1 else replacement.ui.enabled = false;
+            var job: Management.Job = .{
+                .owner = &owner,
+                .id = 1,
+                .kind = .save,
+                .api = api_request,
+                .candidate = try config.fromDocument(allocator, &replacement, settings.base_dir, &diagnostic),
+            };
+            defer job.candidate.?.deinit();
+            try std.testing.expectError(if (change_api) error.ApiRestartRequired else error.UiRestartRequired, job.prepare());
+            try std.testing.expect(!job.saved);
+            const saved = try tmp.dir.readFileAlloc(io, "config.json", allocator, .limited(config.max_file_size));
+            defer allocator.free(saved);
+            try std.testing.expectEqualStrings(original, saved);
+            try std.testing.expect(settings.ui.enabled);
+            try std.testing.expectEqual(@as(u16, 8080), settings.api.port);
+        }
+    }
 }

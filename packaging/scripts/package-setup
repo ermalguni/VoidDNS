@@ -1,0 +1,33 @@
+#!/bin/sh
+# Shared by distribution hooks; never replace operator configuration or keys.
+set -eu
+if ! getent group voiddns >/dev/null; then
+    groupadd --system voiddns
+fi
+if ! id -u voiddns >/dev/null 2>&1; then
+    useradd --system --gid voiddns --home-dir /etc/voiddns --no-create-home --shell /bin/false voiddns
+fi
+if [ ! -e /etc/voiddns ]; then
+    install -d -m 0750 -o voiddns -g voiddns /etc/voiddns
+fi
+if ! command -v systemctl >/dev/null 2>&1; then exit 0; fi
+# Retire the previous separate UI service when upgrading an older package.
+if [ -L /etc/systemd/system/multi-user.target.wants/voiddns-ui.service ] ||
+    { [ -d /run/systemd/system ] && systemctl is-active --quiet voiddns-ui.service; }; then
+    if [ -d /run/systemd/system ]; then systemctl stop voiddns-ui.service || true; fi
+    systemctl disable voiddns-ui.service || true
+fi
+if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+if [ "$1" = install ]; then
+    systemctl enable voiddns.service || true
+    action=start
+else
+    action=try-restart
+fi
+if [ -d /run/systemd/system ]; then
+    if [ "${2:-}" = debian ]; then
+        deb-systemd-invoke "$action" voiddns.service || true
+    else
+        systemctl "$action" voiddns.service || true
+    fi
+fi

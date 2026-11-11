@@ -10,6 +10,7 @@ services:
       - /tmp
     ports:
       - "53:5353/udp"
+      - "127.0.0.1:8081:8080"
     volumes:
       - type: bind
         source: ./examples
@@ -17,16 +18,3 @@ services:
         bind:
           create_host_path: false
     command: ["--config", "/config/voiddns.json"]
-  ui:
-    image: ${VOIDDNS_UI_IMAGE:?Set VOIDDNS_UI_IMAGE to the matching versioned VoidDNS UI image or digest}
-    init: true
-    restart: unless-stopped
-    depends_on:
-      - voiddns
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp
-    ports:
-      - "127.0.0.1:8081:8081"

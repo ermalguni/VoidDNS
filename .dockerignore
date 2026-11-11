@@ -6,8 +6,3 @@
 !zig-out/
 !zig-out/bin/
 !zig-out/bin/VoidDNS
-!ui/
-!ui/Dockerfile
-!ui/Caddyfile.container
-!ui/dist/
-!ui/dist/**

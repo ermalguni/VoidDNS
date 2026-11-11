@@ -51,6 +51,8 @@
         "build.zig.zon",
         "src",
         "examples",
+        "ui/embed.mjs",
+        "ui/dist",
         // For example...
         //"LICENSE",
         //"README.md",

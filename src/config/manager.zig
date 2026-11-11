@@ -82,11 +82,13 @@ fn syncDirectory(dir: std.Io.Dir, io: std.Io) !void {
 }
 
 const minimal_json =
-    \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]}}
+    \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]}}
 ;
 
 const minimal_document: document.Document = .{
-    .schema_version = 1,
+    .schema_version = 2,
+    .api = .{ .enabled = false },
+    .ui = .{ .enabled = false },
     .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
 };
 
@@ -108,7 +110,9 @@ test "manager owns its path and saves valid definitions without source IO" {
     defer manager.deinit();
     @memset(path, 0);
     const replacement: document.Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .dns = .{ .listen = .{ .address = "127.0.0.2", .port = 5353 } },
         .upstream = .{ .servers = &.{.{ .address = "8.8.8.8", .port = 9953 }}, .timeout_ms = 1250 },
         .cache = .{ .capacity = 17 },
@@ -188,7 +192,7 @@ test "invalid saves preserve original bytes and create no temporary files" {
     defer manager.deinit();
     var diagnostic: config.Diagnostic = .{};
     var invalid = minimal_document;
-    invalid.schema_version = 2;
+    invalid.schema_version = 3;
     try std.testing.expectError(error.InvalidConfig, manager.save(io, &invalid, &diagnostic));
     try expectContents(tmp.dir, "config.json", minimal_json);
     invalid = minimal_document;

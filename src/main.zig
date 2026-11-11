@@ -124,11 +124,9 @@ pub fn main(init: std.process.Init) !void {
         management.close();
         if (api) |*server| server.deinit();
     }
-    if (active.settings.api) |settings| {
-        if (settings.enabled) {
-            api = try ApiServer.init(allocator, io, settings, &bridge);
-            try api.?.start();
-        }
+    if (active.settings.api.enabled) {
+        api = try ApiServer.init(allocator, io, active.settings.api, active.settings.ui, &bridge);
+        try api.?.start();
     }
 
     var producer: control.Stdin = .{ .allocator = allocator, .mailbox = &mailbox };

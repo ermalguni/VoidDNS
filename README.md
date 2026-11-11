@@ -6,8 +6,8 @@
 Mantine, React Router, and TanStack Query. It supports overview/cache clearing,
 domain rules, local A/AAAA record sets, blocklist CRUD and refresh, runtime
 settings, complete configuration validation/replacement/reload, and policy checks.
-The UI uses the existing authenticated API; no DNS-path or Zig backend changes
-are required.
+The UI and authenticated API share the embedded HTTP listener; neither runs in
+the DNS query path.
 
 The configuration editor uses Mantine `JsonInput` with two-space indentation on
 load and blur, plus inline JSON syntax errors. Active-state review panels are
@@ -15,9 +15,8 @@ indented too. Formatting changes whitespace only: large integers, numeric
 notation, duplicate keys, and string escapes remain intact for server validation.
 Invalid drafts remain untouched.
 
-Enable the [management API](#management-api) first and keep its restricted key
-file outside the frontend directory. With Node.js 22.12+ (or a newer supported
-Node release) and npm:
+Keep the administrator key file private and outside the frontend directory.
+For frontend development, use Node.js 22.12+ and npm:
 
 ```sh
 cd ui
@@ -41,16 +40,15 @@ produces static assets in `ui/dist/`. `npm run generate` refreshes types alone.
 `npm run preview` is a local build smoke check, not a production server.
 Use a modern browser supporting `Promise.withResolvers`.
 
-For production, build `ui/dist/` and copy its **contents** into
-`/usr/share/voiddns/ui`, or install a release package that includes those assets.
-Adapt [`ui/Caddyfile`](ui/Caddyfile) to your hostname and API address. Serve the
-SPA at `/`, route `/api/v1/*` to VoidDNS, and fall back to `index.html` for UI
-routes. Keep the API on loopback or an otherwise restricted network. Remote
-access requires HTTPS and appropriate network controls. The Caddy example
-provides HTTPS termination; no CORS or second application backend is needed.
-Assets are bundled locally, without CDN dependencies. The UI is not embedded
-in the Zig executable; packages include static assets and Compose uses a Caddy
-sidecar.
+Production builds embed `ui/dist/` in the Zig executable. One VoidDNS process
+serves the public UI and authenticated `/api/v1` namespace on the shared
+`api.listen` listener, default **http://127.0.0.1:8080**. Node.js is build-only;
+no separate UI server, launcher, or reverse proxy is required.
+UI assets do not contain an API key. Frontend routes `/`, `/domains`, `/records`,
+`/blocklists`, `/policy`, `/settings`, and `/configuration` support direct navigation;
+unknown routes and missing assets return `404`.
+Keep management HTTP on loopback or a restricted network. Remote access requires
+HTTPS termination and appropriate network controls.
 
 The login field accepts any nonempty key without client-side length limits.
 The backend accepts arbitrary key-file contents without length or character
@@ -78,9 +76,10 @@ zig fetch git+https://github.com/karlseguin/websocket.zig#f2b3bad6875595e8dd42c7
 ```
 
 This avoids the nested-root archive-cache/hash mismatch observed with this
-Zig 0.17.1 installation and GitHub tarballs. Then build and test:
+Zig 0.17.1 installation and GitHub tarballs. Build the UI before compiling Zig:
 
 ```sh
+(cd ui && npm ci && npm run build)
 zig build
 zig build test
 zig build run -- --help
@@ -88,6 +87,9 @@ zig build run -- --help
 
 Arguments after `--` are forwarded to VoidDNS through the build system's
 `addPassthruArgs` API. The source and pinned HTTP dependency now target Zig 0.17.
+
+`zig build` invokes the Node.js 22 embedding tool `ui/embed.mjs` against
+`ui/dist/`; keep Node available through compilation. The UI must already be built.
 
 ## Linux binaries and packages
 
@@ -134,15 +136,22 @@ sudo dnf install ./voiddns*.rpm
 sudo pacman -U ./voiddns*.pkg.tar.zst
 ```
 
-Packages install `/usr/bin/VoidDNS`, documentation, the MIT license, and examples
-under `/usr/share/doc/voiddns/examples/`. They require `ca-certificates` for HTTPS
-blocklist downloads and `caddy` for serving the UI; apt, dnf, and pacman install
-these dependencies from configured repositories. VoidDNS installs no service
-and creates or replaces no active configuration or API credentials. Copy both
-example files into an operator-owned directory, edit the JSON, and run:
+Packages install `/usr/bin/VoidDNS`, documentation, the MIT license, examples,
+and one `voiddns.service`. They require `ca-certificates` for HTTPS blocklist
+downloads. No active configuration or generated credentials are installed.
+The service runs as `User=voiddns`, with working and configuration directory
+`/etc/voiddns`, and only the DNS bind capability (`CAP_NET_BIND_SERVICE`).
+Its `ConditionPathExists=/etc/voiddns/voiddns.json` prevents unconfigured startup.
+Installation enables the service, but no process starts until that file exists.
+
+Copy both example files into `/etc/voiddns`, edit the JSON, and create a private
+`api.key` owned by the service account with mode `0600`. Keep the operator-managed
+configuration private to the service. The directory and JSON must be writable by
+`voiddns` for API saves: atomic replacement creates a temporary file in the same
+directory. Then start the single service:
 
 ```sh
-VoidDNS --config /path/to/voiddns.json
+sudo systemctl enable --now voiddns.service
 ```
 
 Binding port 53 requires appropriate privileges; use port 5353 for an
@@ -150,16 +159,10 @@ unprivileged smoke test. For the standalone archive, extract it and run
 `./VoidDNS --config /path/to/voiddns.json`; install system CA certificates
 separately if using HTTPS sources.
 
-All three OS package formats also install compiled UI assets under
-`/usr/share/voiddns/ui/` and a Caddy example at
-`/usr/share/doc/voiddns/examples/Caddyfile`. Adapt that example to your hostname
-and enable the authenticated VoidDNS API on `127.0.0.1:8080`. Caddy remains
-operator-managed: VoidDNS does not activate its example configuration. The
-distribution's Caddy package may enable or start its own default service.
-Archives include the same assets in `ui/` and the configuration in
-`examples/Caddyfile`; install Caddy separately and adjust its root to the
-extracted `ui/` directory.
-Node.js is required only to build assets, not on deployment hosts.
+Manage the service with `systemctl status|start|stop voiddns.service`.
+Archives contain the executable with the production UI embedded; run
+`./VoidDNS --config /path/to/voiddns.json`. Node.js is not needed on deployment
+hosts.
 
 ### Docker images
 
@@ -169,15 +172,12 @@ One multi-platform tag contains `linux/amd64`, `linux/arm64`, and `linux/arm/v7`
 Docker selects the host architecture automatically. ARMv6 is not supported.
 There is no floating `latest` tag. Rerunning a version replaces its image tag;
 pin an image digest when immutable deployment is required.
-The matching `ghcr.io/<owner>/<repository>-ui:vX.Y.Z` image serves the UI using
-Caddy on port 8081 for the same platforms. It runs as UID/GID `65532:65532`,
-proxies `/api/v1/*` to `voiddns:8080`, and supports SPA deep links.
-Override `VOIDDNS_API_UPSTREAM` when the backend has another network address.
-No API key is embedded or injected by the proxy; enter your key in the UI.
+The main Alpine image runs a single VoidDNS process with the UI embedded.
+There is no standalone UI image or proxy target setting.
 
 The container job alone receives `packages: write`. It reuses the checksummed
-release binaries, smoke-tests each image with `--help` (QEMU for ARM), and pushes
-to GitHub Container Registry using `GITHUB_TOKEN`. GHCR package visibility may
+release binaries and pushes to GitHub Container Registry using `GITHUB_TOKEN`.
+GHCR package visibility may
 need to be changed to public for anonymous pulls; private images require
 `docker login ghcr.io`.
 
@@ -186,8 +186,9 @@ runs as UID/GID `65532:65532`, and defaults to
 `--config /config/voiddns.json`. No configuration or credentials are embedded.
 
 Copy both example files into a host directory, then edit `voiddns.json`:
-set `dns.listen.address` to `0.0.0.0` and `dns.listen.port` to `5353`.
-Container loopback is not reachable through Docker's published ports.
+set `dns.listen.address` to `0.0.0.0`, `dns.listen.port` to `5353`, and
+`api.listen` to `{"address":"0.0.0.0","port":8080}`. Create the private API key
+before starting. Container loopback is not reachable through published ports.
 
 ```sh
 mkdir -p container-config
@@ -196,6 +197,7 @@ cp examples/voiddns.json examples/blocked-domains.txt container-config/
 docker run -d --init --name voiddns \
   --cap-drop ALL --read-only --tmpfs /tmp \
   -p 53:5353/udp \
+  -p 127.0.0.1:8081:8080 \
   --mount type=bind,src="$(pwd)/container-config",dst=/config \
   ghcr.io/<owner>/<repository>:vX.Y.Z
 ```
@@ -214,8 +216,8 @@ The root `compose.yaml` publishes **host UDP port 53** to container UDP port
 5353, allowing the non-root process to run with all capabilities dropped.
 Host port 53 must be available. TCP DNS is not implemented.
 
-Compose binds the existing `examples` directory directly. Configure both
-listeners for container networking and enable the API before starting:
+Compose binds the existing `examples` directory directly. Configure both listeners
+for container networking before starting:
 
 ```sh
 python3 - <<'PY'
@@ -228,6 +230,7 @@ config["dns"]["listen"] = {"address": "0.0.0.0", "port": 5353}
 config["api"] = {**config.get("api", {}), "enabled": True,
                  "listen": {"address": "0.0.0.0", "port": 8080},
                  "key_file": "api.key"}
+config["ui"] = {"enabled": True}
 path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 ```
@@ -245,25 +248,24 @@ sudo chown 65532:65532 examples examples/voiddns.json examples/api.key
 sudo chmod 600 examples/api.key
 ```
 
-Set both images to matching published versions or digests, then start:
+Set the image to a published version or digest, then start:
 
 ```sh
 export VOIDDNS_IMAGE=ghcr.io/<owner>/<repository>:vX.Y.Z
-export VOIDDNS_UI_IMAGE=ghcr.io/<owner>/<repository>-ui:vX.Y.Z
 docker compose up -d
 docker compose logs -f voiddns
 ```
 
 Open **http://127.0.0.1:8081** and sign in with the exact contents of `api.key`.
-Only the UI proxy is published on host loopback; the API port is not published.
+The one shared management port is published on host loopback; no proxy is used.
 Remote access requires an HTTPS reverse proxy and network controls; do not
 expose this plaintext UI port directly to the Internet.
 
-Replace both image placeholders before running. For locally built images,
-use `VOIDDNS_IMAGE=voiddns:local` and `VOIDDNS_UI_IMAGE=voiddns-ui:local`.
-The configuration remains operator-owned; Compose does not overwrite it on
-restart. For DNS-only operation, start only `docker compose up -d voiddns`;
-the UI image variable must still be set for Compose interpolation.
+Replace the image placeholder before running. For locally built images,
+use `VOIDDNS_IMAGE=voiddns:local`. The configuration remains operator-owned;
+Compose does not overwrite it on restart. No separate UI image is required.
+For DNS-only operation, set both `api.enabled` and `ui.enabled` to `false`;
+no HTTP listener starts. UI-only operation is invalid.
 
 DNS currently uses UDP only. Signal-based graceful shutdown is not
 implemented; for cooperative shutdown, start with `-i` and append
@@ -273,12 +275,11 @@ To build a native amd64 image locally using Zig 0.17.1 (prefetch dependencies
 as described above):
 
 ```sh
+(cd ui && npm ci && npm run build)
 zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-musl -Dcpu=baseline
 docker build --platform linux/amd64 \
   --build-arg BINARY_PATH=zig-out/bin/VoidDNS -t voiddns:local .
 docker run --rm --platform linux/amd64 voiddns:local --help
-(cd ui && npm ci && npm run build)
-docker build -f ui/Dockerfile -t voiddns-ui:local .
 ```
 
 For ARM64 use `aarch64-linux-musl`, `baseline`, and `linux/arm64`; for ARMv7
@@ -287,9 +288,8 @@ images requires QEMU/binfmt support. Without the `BINARY_PATH` override,
 Docker expects prebuilt binaries under `container-bin/amd64/VoidDNS`,
 `container-bin/arm64/VoidDNS`, and `container-bin/armv7/VoidDNS`, as populated
 by the workflow; the Dockerfile does not download a compiler or build Zig.
-The UI Dockerfile likewise consumes prebuilt `ui/dist/`. The release workflow
-builds these assets once with Node.js 22 and the npm lockfile, then shares them
-across OS packages, archives, and UI images.
+The release workflow builds the UI first with Node.js 22 and the npm lockfile,
+then embeds those assets in each architecture's executable.
 
 ## Startup configuration
 
@@ -306,12 +306,12 @@ No implicit file search or environment overrides are performed. Relative
 configuration paths are resolved against the working directory.
 
 The complete schema is demonstrated in [`examples/voiddns.json`](examples/voiddns.json).
-Only `schema_version`, `upstream`, `upstream.servers`, and each server's `address`
-are required. Optional sections and fields use the following defaults:
+`schema_version`, non-null `api` and `ui` objects, `upstream`, `upstream.servers`,
+and each server's `address` are required. Other sections and fields use defaults:
 
 | Field | Default | Accepted values |
 | --- | --- | --- |
-| `schema_version` | Required | `1` |
+| `schema_version` | Required | `2` only |
 | `dns.listen.address` | `"127.0.0.1"` | IPv4 literal |
 | `dns.listen.port` | `53` | Integer, 1–65535 |
 | `upstream.servers` | Required | Nonempty array of address/port objects |
@@ -321,12 +321,27 @@ are required. Optional sections and fields use the following defaults:
 | `cache.capacity` | `4096` | Nonnegative integer fitting `usize`; zero disables caching |
 | `logging.level` | `"info"` | `"err"`, `"warn"`, `"info"`, `"debug"` |
 | `records` | `[]` | Local IN A/AAAA record sets; see below |
-| `api` | Omitted / disabled | Optional management HTTP configuration |
-| `api.enabled` | `true` when `api` is present | Boolean |
+| `api` | Required non-null object | Shared management HTTP configuration |
+| `api.enabled` | `true` | Boolean |
 | `api.listen.address`, `api.listen.port` | `"127.0.0.1"`, `8080` | IPv4 literal and port 1–65535 |
 | `api.key_file` | Required when enabled | Restricted file containing the exact API key bytes |
 | `api.file_root` | Omitted | Root for API-managed relative file sources; omission denies them |
 | `api.allow_private_sources` | `false` | Explicitly permit private-network API URL sources |
+| `ui` | Required non-null object | Embedded frontend configuration |
+| `ui.enabled` | `true` | Boolean; requires `api.enabled = true` |
+
+| `api.enabled` | `ui.enabled` | Behavior |
+| --- | --- | --- |
+| `true` | `true` | Public UI and authenticated API on the shared listener |
+| `true` | `false` | Authenticated API only; frontend requests return `404` |
+| `false` | `false` | DNS only; no HTTP listener or API key loading |
+| `false` | `true` | Invalid configuration |
+
+Schema 1 is a breaking migration with no compatibility mode. Change
+`schema_version` to `2` and add explicit `api` and `ui` objects. For a former
+DNS-only configuration use `"api":{"enabled":false},"ui":{"enabled":false}`.
+For management access retain/configure `api.key_file` and use `"ui":{}` (enabled
+by default). Omission or `null` is not equivalent to disabling either object.
 
 Capacity counts cache slots, not bytes; large values still depend on available
 memory. Hostnames and IPv6 transport addresses are not supported. Binding beyond
@@ -547,7 +562,9 @@ move their `blocks` and `allows` sections into the `--config` file.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "api": {"enabled": false},
+  "ui": {"enabled": false},
   "upstream": {
     "servers": [{"address": "1.1.1.1"}]
   },
@@ -572,8 +589,9 @@ move their `blocks` and `allows` sections into the `--config` file.
 }
 ```
 
-The document requires `schema_version: 1` and the upstream settings described
-above. Omitted `blocks`, `allows`, `lists`, and `domains` are empty. Unknown and
+The document requires `schema_version: 2`, non-null `api` and `ui` objects, and
+the upstream settings described above. Omitted `blocks`, `allows`, `lists`, and
+`domains` are empty. Unknown and
 duplicate fields, wrong types, and unsupported versions are rejected.
 The complete configuration file is limited to 1 MiB.
 Every list requires `id`, `source.kind`, `source.value`, and `format`:
@@ -769,8 +787,9 @@ See [`api.md`](api.md) for the developer and AI-agent API reference, request
 schemas, operation lifecycle, error handling, and a complete client workflow.
 
 The embedded server uses `karlseguin/http.zig`, pinned to Zig 0.17-compatible
-revision `1bb71ff128a044b1645df91046473c38abbf965c`. Omit `api` or set
-`api.enabled` to `false` to disable it. The example leaves it disabled.
+revision `1bb71ff128a044b1645df91046473c38abbf965c`. The required `api` and `ui`
+objects default to enabled. Set both enabled flags to `false` for DNS-only use.
+The example enables both and requires a private `api.key` before startup.
 
 Generate a key in the configuration directory:
 
@@ -778,7 +797,7 @@ Generate a key in the configuration directory:
 (umask 077; openssl rand -hex 32 | tr -d '\n' > examples/api.key)
 ```
 
-Then enable the example's `api` section, or add:
+The example already contains the following API section:
 
 ```json
 "api": {
@@ -800,10 +819,10 @@ state, and retains only the digest. Send exactly one `X-API-Key` header.
 Missing, duplicate, or incorrect keys return `401`; all keys have administrator
 privileges.
 
-API configuration and key rotation require a restart. Live configuration
-updates that change the API settings are rejected before saving. No built-in
-TLS or CORS is provided: for remote access, use HTTPS termination and network
-access controls. Serve a browser frontend and `/api/` behind the same origin;
+API/UI settings, the shared HTTP listener, and key rotation require restart.
+Live changes to API/UI settings are rejected before saving or publication.
+No built-in TLS or CORS is provided: for remote access, use HTTPS termination
+and network access controls. The embedded UI uses the API on the same origin;
 do not distribute an administrator key inside a public frontend bundle.
 
 ### Resources and actions
@@ -815,7 +834,7 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 | --- | --- |
 | `GET /status` | DNS listener readiness, worker generation, active address, revision, current operation, and saved/active agreement |
 | `GET /settings` | Active `dns`, `upstream`, `cache`, and `logging` settings |
-| `PUT /settings` | Replace all four settings sections; retain records, rules, sources, and API settings |
+| `PUT /settings` | Replace all four settings sections; retain records, rules, sources, and API/UI settings |
 | `GET /config` | Canonical active configuration, not the potentially different file contents |
 | `PUT /config` | Save and activate a complete configuration |
 | `POST /config/validate` | Strict schema/semantic validation without fetching sources or binding sockets |

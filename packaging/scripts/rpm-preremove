@@ -1,0 +1,8 @@
+#!/bin/sh
+# RPM passes 0 only when the last installed version is being removed.
+if [ "${1:-}" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop voiddns.service || true
+    fi
+    systemctl disable voiddns.service || true
+fi

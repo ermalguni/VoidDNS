@@ -1,0 +1,8 @@
+#!/bin/sh
+# pacman does not call pre_remove during an upgrade.
+if command -v systemctl >/dev/null 2>&1; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop voiddns.service || true
+    fi
+    systemctl disable voiddns.service || true
+fi

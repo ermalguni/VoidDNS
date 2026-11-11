@@ -35,7 +35,7 @@ export interface paths {
         get: operations["get_settings"];
         /**
          * Persist and activate runtime settings
-         * @description Preserves explicit rules, records, sources and restart-only API configuration.
+         * @description Preserves explicit rules, records, sources and restart-only API and UI configuration.
          */
         put: operations["put_settings"];
         post?: never;
@@ -56,7 +56,7 @@ export interface paths {
         get: operations["get_config"];
         /**
          * Persist and activate a complete configuration
-         * @description Saved and active outcomes are distinct. An activation failure can leave the previous runtime active and the candidate on disk. API transport settings are restart-only.
+         * @description Saved and active outcomes are distinct. An activation failure can leave the previous runtime active and the candidate on disk. API and UI settings, including the shared HTTP listener, are restart-only; changes are rejected before saving or publication.
          */
         put: operations["put_config"];
         post?: never;
@@ -366,6 +366,7 @@ export interface components {
             /** @enum {unknown} */
             level?: "err" | "warn" | "info" | "debug";
         };
+        /** @description Required non-null API configuration. Enabled defaults to true. The API and embedded UI share api.listen (default 127.0.0.1:8080). Changes require restart and are rejected by live replacement or reload before saving or publication. */
         ApiSettings: {
             /** @default true */
             enabled: boolean;
@@ -375,6 +376,11 @@ export interface components {
             /** @default true */
             allow_private_sources: boolean;
         } & unknown;
+        /** @description Required non-null embedded UI configuration. Enabled defaults to true and requires api.enabled to be true. UI assets are public; API endpoints always require authentication. Changes require restart and are rejected by live replacement or reload before saving or publication. */
+        UiSettings: {
+            /** @default true */
+            enabled: boolean;
+        };
         Source: {
             id: string;
             name?: string | null;
@@ -409,14 +415,16 @@ export interface components {
             cache: components["schemas"]["CacheSettings"];
             logging: components["schemas"]["Logging"];
         };
+        /** @description Only schema_version 2 is supported. Non-null api and ui objects are required; enabled defaults to true in each. API/UI true/true serves the public embedded UI and authenticated API; true/false serves API only with frontend routes returning 404; false/false is DNS-only with no HTTP listener; false/true is invalid. API/UI settings and the shared HTTP listener require restart; live changes are rejected before saving or publication. */
         Config: {
             /** @constant */
-            schema_version: 1;
+            schema_version: 2;
             dns?: components["schemas"]["Dns"];
             upstream: components["schemas"]["Upstream"];
             cache?: components["schemas"]["CacheSettings"];
             logging?: components["schemas"]["Logging"];
-            api?: components["schemas"]["ApiSettings"];
+            api: components["schemas"]["ApiSettings"];
+            ui: components["schemas"]["UiSettings"];
             records?: components["schemas"]["RecordInput"][];
             blocks?: {
                 domains?: string[];
@@ -425,7 +433,7 @@ export interface components {
             allows?: {
                 domains?: string[];
             };
-        };
+        } & unknown;
         Error: {
             error: {
                 code: string;

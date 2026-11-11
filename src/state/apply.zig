@@ -156,11 +156,11 @@ test "record and rule diff preserves unchanged ownership and applies deletions" 
     const allocator = std.testing.allocator;
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"keep.test","type":"A","addresses":["192.0.2.1"]},{"name":"gone.test","type":"AAAA","addresses":["::1"]}],"blocks":{"domains":["keep.test","gone.test"]},"allows":{"domains":["allow.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"keep.test","type":"A","addresses":["192.0.2.1"]},{"name":"gone.test","type":"AAAA","addresses":["::1"]}],"blocks":{"domains":["keep.test","gone.test"]},"allows":{"domains":["allow.test"]}}
     , ".", &diagnostic);
     defer previous.deinit();
     var candidate = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]},{"name":"KEEP.TEST.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["KEEP.TEST.","new.test"]},"allows":{"domains":[]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]},{"name":"KEEP.TEST.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["KEEP.TEST.","new.test"]},"allows":{"domains":[]}}
     , ".", &diagnostic);
     defer candidate.deinit();
     var state = try previous.prepareState(std.testing.io, &diagnostic);
@@ -188,11 +188,11 @@ test "normalized record reordering and duplicate explicit rules are a no-op" {
     const allocator = std.testing.allocator;
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"one.test","type":"A","addresses":["192.0.2.1"]},{"name":"two.test","type":"AAAA","addresses":["::1"]}],"blocks":{"domains":["one.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"one.test","type":"A","addresses":["192.0.2.1"]},{"name":"two.test","type":"AAAA","addresses":["::1"]}],"blocks":{"domains":["one.test"]}}
     , ".", &diagnostic);
     defer previous.deinit();
     var candidate = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"TWO.TEST.","type":"AAAA","addresses":["::1"]},{"name":"one.test","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["ONE.TEST.","one.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"TWO.TEST.","type":"AAAA","addresses":["::1"]},{"name":"one.test","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["ONE.TEST.","one.test"]}}
     , ".", &diagnostic);
     defer candidate.deinit();
     var state = try previous.prepareState(std.testing.io, &diagnostic);
@@ -210,11 +210,11 @@ fn allocationFailure(allocator: std.mem.Allocator) !void {
     const config = @import("../config/config.zig");
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"old.test","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["old.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"old.test","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["old.test"]}}
     , ".", &diagnostic);
     defer previous.deinit();
     var candidate = try config.parse(allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]}],"blocks":{"domains":["new.test"]},"allows":{"domains":["allow.test"]}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]}],"blocks":{"domains":["new.test"]},"allows":{"domains":["allow.test"]}}
     , ".", &diagnostic);
     defer candidate.deinit();
     var state = try previous.prepareState(std.testing.io, &diagnostic);

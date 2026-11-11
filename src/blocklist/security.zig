@@ -19,10 +19,9 @@ pub fn validateApiSources(allocator: std.mem.Allocator, io: std.Io, candidate: *
         source.api_managed = true;
         if (source.access.file_root) |root| candidate.allocator.free(root);
         source.access = .{};
-        if (candidate.api) |api| {
-            source.access.allow_private_sources = api.allow_private_sources;
-            if (api.file_root) |root| source.access.file_root = try candidate.allocator.dupe(u8, root);
-        }
+        const api = candidate.api;
+        source.access.allow_private_sources = api.allow_private_sources;
+        if (api.file_root) |root| source.access.file_root = try candidate.allocator.dupe(u8, root);
         switch (source.source.kind) {
             .file => {
                 if (source.access.file_root == null) return error.ApiFileSourcesDisabled;
@@ -122,7 +121,7 @@ test "source network policy rejects local mapped and special addresses" {
 
 test "API provenance survives unchanged edits and cannot be downgraded" {
     const allocator = std.testing.allocator;
-    const document: config.Document = .{ .schema_version = 1, .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} }, .blocks = .{ .lists = &.{.{ .id = "trusted", .source = .{ .kind = .file, .value = "/operator/list" }, .format = .domains }} } };
+    const document: config.Document = .{ .schema_version = 2, .api = .{ .enabled = false }, .ui = .{ .enabled = false }, .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} }, .blocks = .{ .lists = &.{.{ .id = "trusted", .source = .{ .kind = .file, .value = "/operator/list" }, .format = .domains }} } };
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.fromDocument(allocator, &document, ".", &diagnostic);
     defer previous.deinit();

@@ -3,6 +3,7 @@ const httpz = @import("httpz");
 const config = @import("../config/config.zig");
 const Auth = @import("auth.zig").Auth;
 const Bridge = @import("bridge.zig").Bridge;
+const static = @import("static.zig");
 
 const max_config_body = 1024 * 1024;
 const max_resource_body = 64 * 1024;
@@ -16,7 +17,7 @@ pub const Server = struct {
     thread: ?std.Thread = null,
     listen_error: ?anyerror = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, settings: config.Api, bridge: *Bridge) !Server {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, settings: config.Api, ui: config.Ui, bridge: *Bridge) !Server {
         const address = try std.Io.net.IpAddress.parseIp4(settings.listen_address, settings.port);
         if (settings.port == 0) return error.InvalidApiPort;
         var auth = try Auth.load(allocator, io, settings.key_file orelse return error.MissingApiKeyFile);
@@ -35,7 +36,7 @@ pub const Server = struct {
                     .lazy_read_size = 0,
                 },
                 .timeout = .{ .request = 15, .keepalive = 5, .request_count = 100 },
-            }, .{ .auth = auth, .bridge = bridge }),
+            }, .{ .auth = auth, .bridge = bridge, .ui_enabled = ui.enabled }),
         };
     }
 
@@ -86,23 +87,51 @@ pub const Server = struct {
 const Handler = struct {
     auth: Auth,
     bridge: *Bridge,
+    ui_enabled: bool,
 
-    // Taking over dispatch means every method and unknown /api/v1 route goes
+    // Taking over dispatch means every method and unknown /api route goes
     // through authentication, rather than bypassing it through router misses.
     pub fn handle(self: Handler, req: *httpz.Request, res: *httpz.Response) void {
         res.content_type = .JSON;
-        res.header("Cache-Control", "no-store");
+        if (isApiPath(req.url.path)) res.header("Cache-Control", "no-store");
         res.header("X-Content-Type-Options", "nosniff");
+        res.header("Referrer-Policy", "no-referrer");
+        res.header("X-Frame-Options", "DENY");
         self.serve(req, res) catch {
             jsonError(res, 500, "internal_error");
             req.conn.handover = .close;
         };
         // Never let httpz drain an unread rejected body on a keepalive socket.
         if (req.unread_body != 0) req.conn.handover = .close;
+        // httpz writes bodies for HEAD unless we suppress them explicitly.
+        // Static successes already carry their generated representation length.
+        if (req.method == .HEAD and res.body.len != 0) {
+            const length = std.fmt.allocPrint(req.conn.req_arena.allocator(), "{d}", .{res.body.len}) catch {
+                res.body = "";
+                req.conn.handover = .close;
+                return;
+            };
+            res.header("Content-Length", length);
+            res.body = "";
+        }
     }
 
     fn serve(self: Handler, req: *httpz.Request, res: *httpz.Response) !void {
-        if (!isApiPath(req.url.path)) return jsonError(res, 404, "not_found");
+        if (!isApiPath(req.url.path)) {
+            switch (static.serve(self.ui_enabled, req, res)) {
+                .served => {},
+                .not_found => {
+                    res.header("Cache-Control", "no-store");
+                    jsonError(res, 404, "not_found");
+                },
+                .method_not_allowed => {
+                    res.header("Cache-Control", "no-store");
+                    res.header("Allow", "GET, HEAD");
+                    jsonError(res, 405, "method_not_allowed");
+                },
+            }
+            return;
+        }
         // httpz stops storing headers when its fixed table fills. Reject at
         // capacity so a later duplicate API key cannot be silently discarded.
         if (req.headers.len >= max_headers) return jsonError(res, 431, "too_many_headers");
@@ -162,7 +191,7 @@ fn uniqueHeader(headers: *const httpz.key_value.StringKeyValue, name: []const u8
 }
 
 fn isApiPath(path: []const u8) bool {
-    return std.mem.eql(u8, path, "/api/v1") or std.mem.startsWith(u8, path, "/api/v1/");
+    return std.mem.eql(u8, path, "/api") or std.mem.startsWith(u8, path, "/api/");
 }
 
 fn bodyLimit(path: []const u8) usize {
@@ -191,9 +220,66 @@ test "API headers reject duplicate keys instead of selecting one" {
 test "API namespace boundaries and configuration body limits" {
     try std.testing.expect(isApiPath("/api/v1"));
     try std.testing.expect(isApiPath("/api/v1/unknown"));
-    try std.testing.expect(!isApiPath("/api/v10/status"));
-    try std.testing.expect(!isApiPath("/api/v1evil"));
+    try std.testing.expect(isApiPath("/api/unknown"));
+    try std.testing.expect(isApiPath("/api/v10/status"));
+    try std.testing.expect(isApiPath("/api/v1evil"));
+    try std.testing.expect(!isApiPath("/apievil"));
     try std.testing.expectEqual(max_config_body, bodyLimit("/api/v1/config"));
     try std.testing.expectEqual(max_config_body, bodyLimit("/api/v1/config/validate"));
     try std.testing.expectEqual(max_resource_body, bodyLimit("/api/v1/records"));
+}
+
+test "public UI bypasses authentication and carries security headers" {
+    const handler: Handler = .{
+        .auth = .{ .digest = @splat(0) },
+        .bridge = undefined,
+        .ui_enabled = true,
+    };
+    var public = httpz.testing.init(.{});
+    defer public.deinit();
+    public.url("/configuration");
+    handler.handle(public.req, public.res);
+    try public.expectStatus(200);
+    try public.expectHeader("Content-Type", "text/html; charset=utf-8");
+    try public.expectHeader("Cache-Control", "no-cache");
+    try public.expectHeader("X-Content-Type-Options", "nosniff");
+    try public.expectHeader("Referrer-Policy", "no-referrer");
+    try public.expectHeader("X-Frame-Options", "DENY");
+
+    var method = httpz.testing.init(.{});
+    defer method.deinit();
+    method.url("/");
+    method.req.method = .POST;
+    method.req.unread_body = 1;
+    handler.handle(method.req, method.res);
+    try method.expectStatus(405);
+    try method.expectHeader("Allow", "GET, HEAD");
+    try std.testing.expect(method.req.conn.handover == .close);
+}
+
+test "API misses stay authenticated and disabled frontend HEAD is bodyless" {
+    const handler: Handler = .{
+        .auth = .{ .digest = @splat(0) },
+        .bridge = undefined,
+        .ui_enabled = false,
+    };
+    for ([_][]const u8{ "/api", "/api/unknown", "/api/v1/unknown" }) |path| {
+        var request = httpz.testing.init(.{});
+        defer request.deinit();
+        request.url(path);
+        handler.handle(request.req, request.res);
+        try request.expectStatus(401);
+        try request.expectHeader("Cache-Control", "no-store");
+    }
+
+    var head = httpz.testing.init(.{});
+    defer head.deinit();
+    head.url("/");
+    head.req.method = .HEAD;
+    handler.handle(head.req, head.res);
+    try head.expectStatus(404);
+    try head.expectBody("");
+    try head.expectHeader("Content-Length", std.fmt.comptimePrint("{d}", .{
+        "{\"error\":{\"code\":\"not_found\",\"message\":\"not_found\"}}".len,
+    }));
 }

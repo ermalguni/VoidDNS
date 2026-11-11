@@ -25,6 +25,10 @@ pub const Api = struct {
     }
 };
 
+pub const Ui = struct {
+    enabled: bool = true,
+};
+
 /// Owns typed configuration definitions and paths, never runtime filtering state.
 pub const Config = struct {
     listen_address: std.Io.net.IpAddress,
@@ -36,10 +40,11 @@ pub const Config = struct {
     definitions: Definitions,
     records: []const Record,
     base_dir: []const u8,
-    api: ?Api = null,
+    api: Api,
+    ui: Ui,
 
     pub fn deinit(self: *Config) void {
-        if (self.api) |*api| api.deinit(self.allocator);
+        self.api.deinit(self.allocator);
         self.definitions.deinit(self.allocator);
         freeRecords(self.allocator, self.records);
         self.allocator.free(self.records);
@@ -129,8 +134,10 @@ pub fn fromDocument(
     diagnostic: *Diagnostic,
 ) !Config {
     diagnostic.* = .{};
-    if (document.schema_version != 1)
-        return diagnostic.invalid("schema_version: unsupported version {d}; expected 1", .{document.schema_version});
+    if (document.schema_version != 2)
+        return diagnostic.invalid("schema_version: unsupported version {d}; expected 2", .{document.schema_version});
+    if (document.ui.enabled and !document.api.enabled)
+        return diagnostic.invalid("ui.enabled: requires api.enabled to be true", .{});
     const listen = document.dns.listen;
     const listen_address = try address(listen.address, listen.port, "dns.listen", diagnostic);
     const servers = document.upstream.servers;
@@ -163,35 +170,31 @@ pub fn fromDocument(
     }
     const owned_base_dir = try allocator.dupe(u8, base_dir);
     errdefer allocator.free(owned_base_dir);
-    var api: ?Api = null;
-    errdefer if (api) |*settings| settings.deinit(allocator);
-    if (document.api) |settings| {
-        _ = try address(settings.listen.address, settings.listen.port, "api.listen", diagnostic);
-        if (settings.enabled and settings.key_file == null)
-            return diagnostic.invalid("api.key_file: required when API is enabled", .{});
-        if (settings.key_file) |path| {
-            if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
-                return diagnostic.invalid("api.key_file: expected a nonempty path", .{});
-        }
-        if (settings.file_root) |path| {
-            if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
-                return diagnostic.invalid("api.file_root: expected a nonempty path", .{});
-        }
-        api = .{
-            .enabled = settings.enabled,
-            .listen_address = try allocator.dupe(u8, settings.listen.address),
-            .port = settings.listen.port,
-            .allow_private_sources = settings.allow_private_sources,
-        };
-        if (settings.key_file) |path| api.?.key_file = try resolvePath(allocator, base_dir, path);
-        if (settings.file_root) |path| api.?.file_root = try resolvePath(allocator, base_dir, path);
+    const settings = document.api;
+    _ = try address(settings.listen.address, settings.listen.port, "api.listen", diagnostic);
+    if (settings.enabled and settings.key_file == null)
+        return diagnostic.invalid("api.key_file: required when API is enabled", .{});
+    if (settings.key_file) |path| {
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+            return diagnostic.invalid("api.key_file: expected a nonempty path", .{});
     }
+    if (settings.file_root) |path| {
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+            return diagnostic.invalid("api.file_root: expected a nonempty path", .{});
+    }
+    var api: Api = .{
+        .enabled = settings.enabled,
+        .listen_address = try allocator.dupe(u8, settings.listen.address),
+        .port = settings.listen.port,
+        .allow_private_sources = settings.allow_private_sources,
+    };
+    errdefer api.deinit(allocator);
+    if (settings.key_file) |path| api.key_file = try resolvePath(allocator, base_dir, path);
+    if (settings.file_root) |path| api.file_root = try resolvePath(allocator, base_dir, path);
     for (definitions.sources.items) |*source| {
         if (source.api_managed) {
-            if (api) |settings| {
-                source.access.allow_private_sources = settings.allow_private_sources;
-                if (settings.file_root) |path| source.access.file_root = try allocator.dupe(u8, path);
-            }
+            source.access.allow_private_sources = api.allow_private_sources;
+            if (api.file_root) |path| source.access.file_root = try allocator.dupe(u8, path);
         }
     }
 
@@ -206,6 +209,7 @@ pub fn fromDocument(
         .records = records,
         .base_dir = owned_base_dir,
         .api = api,
+        .ui = document.ui,
     };
 }
 
@@ -227,7 +231,9 @@ fn documentPath(allocator: std.mem.Allocator, base_dir: []const u8, path: ?[]con
 /// Canonical active definitions. Every slice is owned by the caller's arena.
 pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
     var result: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = undefined,
+        .ui = self.ui,
         .dns = .{ .listen = .{ .address = try ip4Text(allocator, self.listen_address.ip4.bytes), .port = self.listen_address.getPort() } },
         .upstream = .{ .servers = undefined, .timeout_ms = self.upstream_timeout_ms },
         .cache = .{ .capacity = self.cache_capacity },
@@ -239,7 +245,8 @@ pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
         server.* = .{ .address = try ip4Text(allocator, ip.ip4.bytes), .port = ip.getPort() };
     }
     result.upstream.servers = servers;
-    if (self.api) |api| result.api = .{
+    const api = self.api;
+    result.api = .{
         .enabled = api.enabled,
         .listen = .{ .address = try allocator.dupe(u8, api.listen_address), .port = api.port },
         .key_file = try documentPath(allocator, self.base_dir, api.key_file),
@@ -375,7 +382,7 @@ fn address(text: []const u8, port: u16, path: []const u8, diagnostic: *Diagnosti
 }
 
 const minimal_json =
-    \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]}}
+    \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]}}
 ;
 
 fn expectInvalid(contents: []const u8) !void {
@@ -400,7 +407,7 @@ test "minimal configuration applies every optional default" {
 
 test "explicit configuration owns addresses and preserves upstream order" {
     const input = try std.testing.allocator.dupe(u8,
-        \\{"schema_version":1,"dns":{"listen":{"address":"0.0.0.0","port":65535}},
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"dns":{"listen":{"address":"0.0.0.0","port":65535}},
         \\ "upstream":{"servers":[{"address":"192.0.2.1","port":1},{"address":"8.8.8.8"}],"timeout_ms":4294967295},
         \\ "cache":{"capacity":0},"logging":{"level":"debug"}}
     );
@@ -425,25 +432,25 @@ test "required fields and schema version are validated" {
     const cases = [_][]const u8{
         "{}",
         "{\"schema_version\":\"1\"}",
-        "{\"schema_version\":1.0}",
-        "{\"schema_version\":1}",
-        "{\"schema_version\":1,\"upstream\":{}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{}]}}",
-        "{\"schema_version\":2,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}",
-        "{\"schema_version\":0,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}",
+        "{\"schema_version\":2.0}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{}]}}",
+        "{\"schema_version\":1,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}",
+        "{\"schema_version\":3,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}",
     };
     for (cases) |input| try expectInvalid(input);
 }
 
 test "unknown fields are rejected at every schema level" {
     const cases = [_][]const u8{
-        "{\"schema_version\":1,\"dns\":{\"typo\":true}}",
-        "{\"schema_version\":1,\"dns\":{\"listen\":{\"host\":\"localhost\"}}}",
-        "{\"schema_version\":1,\"upstream\":{\"retry\":true}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"weight\":2}]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"cache\":{\"ttl\":1}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"file\":\"log\"}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":{\"typo\":true}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":{\"listen\":{\"host\":\"localhost\"}}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"retry\":true}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"weight\":2}]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"cache\":{\"ttl\":1}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"file\":\"log\"}}",
     };
     for (cases) |input| try expectInvalid(input);
 }
@@ -452,20 +459,20 @@ test "ports reject zero overflow strings fractions and other types" {
     for ([_][]const u8{ "0", "65536", "-1", "\"53\"", "53.0", "5.3e1", "null", "true", "[]", "{}" }) |port| {
         const input = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"schema_version\":1,\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}},{{\"address\":\"8.8.8.8\",\"port\":{s}}}]}}}}",
+            "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}},{{\"address\":\"8.8.8.8\",\"port\":{s}}}]}}}}",
             .{port},
         );
         defer std.testing.allocator.free(input);
         try expectInvalid(input);
     }
-    try expectInvalid("{\"schema_version\":1,\"dns\":{\"listen\":{\"port\":0}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":{\"listen\":{\"port\":0}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
 }
 
 test "timeout and capacity enforce integer ranges without coercion" {
     for ([_][]const u8{ "0", "4294967296", "-1", "\"3000\"", "1e3", "null" }) |timeout| {
         const input = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"schema_version\":1,\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}],\"timeout_ms\":{s}}}}}",
+            "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}],\"timeout_ms\":{s}}}}}",
             .{timeout},
         );
         defer std.testing.allocator.free(input);
@@ -474,7 +481,7 @@ test "timeout and capacity enforce integer ranges without coercion" {
     for ([_][]const u8{ "-1", "\"4096\"", "1.5", "18446744073709551616", "false" }) |capacity| {
         const input = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"schema_version\":1,\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}]}},\"cache\":{{\"capacity\":{s}}}}}",
+            "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}]}},\"cache\":{{\"capacity\":{s}}}}}",
             .{capacity},
         );
         defer std.testing.allocator.free(input);
@@ -486,13 +493,13 @@ test "IPv4 literals are required for listen and upstream addresses" {
     for ([_][]const u8{ "localhost", "::1", "1.2.3", "256.1.1.1", "01.2.3.4", "1.1.1.1:53", "" }) |ip| {
         const input = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"schema_version\":1,\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}},{{\"address\":\"{s}\"}}]}}}}",
+            "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}},{{\"address\":\"{s}\"}}]}}}}",
             .{ip},
         );
         defer std.testing.allocator.free(input);
         try expectInvalid(input);
     }
-    try expectInvalid("{\"schema_version\":1,\"dns\":{\"listen\":{\"address\":\"::1\"}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":{\"listen\":{\"address\":\"::1\"}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
 }
 
 test "wrong container and leaf types are rejected" {
@@ -500,17 +507,17 @@ test "wrong container and leaf types are rejected" {
         "[]",
         "null",
         "{\"schema_version\":true}",
-        "{\"schema_version\":1,\"dns\":null}",
-        "{\"schema_version\":1,\"dns\":{\"listen\":[]}}",
-        "{\"schema_version\":1,\"upstream\":null}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":{}}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[null]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":123}]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":[49,46,49,46,49,46,49]}]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"cache\":null}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":[]}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"level\":0}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"level\":\"trace\"}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":null}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"dns\":{\"listen\":[]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":null}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":{}}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[null]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":123}]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":[49,46,49,46,49,46,49]}]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"cache\":null}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":[]}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"level\":0}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"logging\":{\"level\":\"trace\"}}",
     };
     for (cases) |input| try expectInvalid(input);
 }
@@ -519,14 +526,14 @@ test "malformed JSON duplicate fields comments and trailing content are rejected
     const cases = [_][]const u8{
         "",
         "{",
-        "{\"schema_version\":1,}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},}",
         "{\"schema_version\":01}",
         "// comment\n" ++ minimal_json,
         minimal_json ++ " {}",
-        "{\"schema_version\":1,\"schema_version\":1}",
-        "{\"schema_version\":1,\"schema_vers\\u0069on\":1}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[],\"servers\":[]}}",
-        "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"address\":\"8.8.8.8\"}]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"schema_version\":1}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"schema_vers\\u0069on\":1}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[],\"servers\":[]}}",
+        "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"address\":\"8.8.8.8\"}]}}",
     };
     for (cases) |input| {
         var diagnostic: Diagnostic = .{};
@@ -573,7 +580,7 @@ test "unified configuration owns explicit filtering and loads paths relative to 
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "domains.txt", .data = "Imported.Example.\n" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data =
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
         \\"blocks":{"domains":["Blocked.Example."],"lists":[
         \\{"id":"file","source":{"kind":"file","value":"domains.txt"},"format":"domains"}]},
         \\"allows":{"domains":["Allowed.Example"]}}
@@ -593,14 +600,14 @@ test "unified configuration owns explicit filtering and loads paths relative to 
 
 test "unified filtering retains strict nested validation" {
     var diagnostic: Diagnostic = .{};
-    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
     try expectInvalid(prefix ++ "\"blocks\":{\"unknown\":true}}");
     try expectInvalid(prefix ++ "\"allows\":{\"domains\":\"wrong\"}}");
     try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, prefix ++ "\"blocks\":{\"domains\":[],\"domains\":[]}}", ".", &diagnostic));
 }
 
 const filtering_json =
-    \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+    \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
     \\"blocks":{"domains":["Blocked.Example."],"lists":[
     \\{"id":"off","name":"Owned name","enabled":false,"source":{"kind":"file","value":"missing.txt"},"format":"hosts"},
     \\{"id":"remote","source":{"kind":"url","value":"http://127.0.0.1:1/list"},"format":"domains"}]},
@@ -644,7 +651,7 @@ test "prepared runtime state outlives its configuration definitions" {
     var diagnostic: Diagnostic = .{};
     var state = blk: {
         var config = try parse(std.testing.allocator,
-            \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+            \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
             \\"blocks":{"domains":["Blocked.Example."],"lists":[
             \\{"id":"off","name":"Disabled","enabled":false,"source":{"kind":"file","value":"missing"},"format":"hosts"}]},
             \\"allows":{"domains":["Allowed.Example"]}}
@@ -662,7 +669,7 @@ test "prepared runtime state outlives its configuration definitions" {
 }
 
 test "all filtering structure and disabled definition validation occurs during parsing" {
-    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
     const cases = [_]struct { []const u8, anyerror }{
         .{ "\"blocks\":null}", error.InvalidConfig },
         .{ "\"blocks\":{\"lists\":{}}}", error.InvalidConfig },
@@ -748,12 +755,14 @@ test "typed document serialization round trips editable values and omitted sourc
 
 test "constructed documents receive the same semantic validation as parsed input" {
     const valid: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
     };
     var document = valid;
     var diagnostic: Diagnostic = .{};
-    document.schema_version = 2;
+    document.schema_version = 3;
     try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
     document = valid;
     document.dns.listen.port = 0;
@@ -800,16 +809,16 @@ test "constructed documents receive the same semantic validation as parsed input
 }
 
 test "strict token checks recognize escaped field names and reject byte arrays for strings" {
-    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},";
     try expectInvalid("{\"schema_vers\\u0069on\":\"1\",\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
-    try expectInvalid("{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"po\\u0072t\":\"53\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\",\"po\\u0072t\":\"53\"}]}}");
     try expectInvalid(prefix ++ "\"blocks\":{\"domains\":[[97,46,98]]}}");
     try expectInvalid(prefix ++ "\"blocks\":{\"lists\":[{\"id\":[97],\"source\":{\"kind\":\"file\",\"value\":\"missing\"},\"format\":\"domains\"}]}}");
     try expectInvalid(prefix ++ "\"blocks\":{\"lists\":[{\"id\":\"off\",\"source\":{\"kind\":\"file\",\"value\":[97]},\"format\":\"domains\"}]}}");
 }
 
 const records_json =
-    \\{"schema_version":1,"upstream":{"servers":[{"address":"1.1.1.1"}]},
+    \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
     \\"records":[
     \\ {"name":"Home.TEST.","type":"A","addresses":["192.0.2.2","192.0.2.1","192.0.2.2"]},
     \\ {"name":"HOME.test","type":"AAAA","ttl":0,"addresses":["2001:db8::2","2001:0db8:0:0:0:0:0:2","::1","2001:db8::1"]},
@@ -845,7 +854,9 @@ test "constructed records are copied independently from editable buffers" {
     var literal = "192.0.2.1".*;
     var literals = [_][]const u8{&literal};
     var document: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
         .records = &.{.{ .name = &name, .type = .A, .addresses = &literals }},
     };
@@ -864,7 +875,7 @@ fn expectInvalidRecords(document: *const Document, field: []const u8) !void {
     var diagnostic: Diagnostic = .{};
     try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, document, ".", &diagnostic));
     try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), field) != null);
-    const serialized = try std.json.Stringify.valueAlloc(std.testing.allocator, document.*, .{});
+    const serialized = try std.json.Stringify.valueAlloc(std.testing.allocator, document.*, .{ .emit_null_optional_fields = false });
     defer std.testing.allocator.free(serialized);
     try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, serialized, ".", &diagnostic));
     try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), field) != null);
@@ -872,7 +883,9 @@ fn expectInvalidRecords(document: *const Document, field: []const u8) !void {
 
 test "parsed and constructed records reject invalid names and wrong address families" {
     var document: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
     };
     for ([_][]const u8{ "", ".", "*.test", "a..test", "-a.test", "127.0.0.1", "caf\xc3\xa9.test" }) |name| {
@@ -894,7 +907,9 @@ test "parsed and constructed records reject invalid names and wrong address fami
 
 test "records enforce input address count before deduplication" {
     var document: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
         .records = &.{.{ .name = "host.test", .type = .A, .addresses = &.{} }},
     };
@@ -915,7 +930,9 @@ test "records enforce input address count before deduplication" {
 
 test "duplicate normalized record names reject only matching families" {
     var document: Document = .{
-        .schema_version = 1,
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
         .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
         .records = &.{
             .{ .name = "Host.Test.", .type = .A, .addresses = &.{"192.0.2.1"} },
@@ -931,7 +948,7 @@ test "duplicate normalized record names reject only matching families" {
 }
 
 test "records require strict JSON field shapes and supported record types" {
-    const prefix = "{\"schema_version\":1,\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"records\":";
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"records\":";
     const values = [_][]const u8{
         "null",                                                                               "{}",                                                                      "[null]",                                                                      "[{}]",
         "[{\"type\":\"A\",\"addresses\":[\"192.0.2.1\"]}]",                                   "[{\"name\":\"host.test\",\"addresses\":[\"192.0.2.1\"]}]",                "[{\"name\":\"host.test\",\"type\":\"A\"}]",                                   "[{\"name\":3,\"type\":\"A\",\"addresses\":[\"192.0.2.1\"]}]",
@@ -965,30 +982,30 @@ test "records release all partial allocations on failure" {
 
 test "API configuration validates listener and independently owns resolved paths" {
     var diagnostic: Diagnostic = .{};
-    try expectInvalid("{\"schema_version\":1,\"api\":{},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
-    try expectInvalid("{\"schema_version\":1,\"api\":{\"enabled\":false,\"listen\":{\"address\":\"localhost\"}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
-    try expectInvalid("{\"schema_version\":1,\"api\":{\"enabled\":false,\"listen\":{\"port\":0}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"ui\":{\"enabled\":false},\"api\":{},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"ui\":{\"enabled\":false},\"api\":{\"enabled\":false,\"listen\":{\"address\":\"localhost\"}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
+    try expectInvalid("{\"schema_version\":2,\"ui\":{\"enabled\":false},\"api\":{\"enabled\":false,\"listen\":{\"port\":0}},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}");
     var settings = try parse(std.testing.allocator,
-        \\{"schema_version":1,"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1"}]}}
+        \\{"schema_version":2,"ui":{"enabled":false},"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1"}]}}
     , "/configuration", &diagnostic);
     defer settings.deinit();
-    try std.testing.expectEqualStrings("/configuration/key", settings.api.?.key_file.?);
-    try std.testing.expectEqualStrings("/configuration/lists", settings.api.?.file_root.?);
-    try std.testing.expectEqual(@as(u16, 8080), settings.api.?.port);
+    try std.testing.expectEqualStrings("/configuration/key", settings.api.key_file.?);
+    try std.testing.expectEqualStrings("/configuration/lists", settings.api.file_root.?);
+    try std.testing.expectEqual(@as(u16, 8080), settings.api.port);
 }
 
 test "canonical document round trip retains normalized records rules and managed policy" {
     const allocator = std.testing.allocator;
     var diagnostic: Diagnostic = .{};
     var settings = try parse(allocator,
-        \\{"schema_version":1,"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1","port":5353}]},"blocks":{"domains":["BLOCK.TEST."],"lists":[{"id":"managed","api_managed":true,"source":{"kind":"file","value":"one.txt"},"format":"domains"}]},"records":[{"name":"Home.Test.","type":"AAAA","ttl":17,"addresses":["2001:db8::1"]}]}
+        \\{"schema_version":2,"ui":{"enabled":false},"api":{"key_file":"key","file_root":"lists"},"upstream":{"servers":[{"address":"1.1.1.1","port":5353}]},"blocks":{"domains":["BLOCK.TEST."],"lists":[{"id":"managed","api_managed":true,"source":{"kind":"file","value":"one.txt"},"format":"domains"}]},"records":[{"name":"Home.Test.","type":"AAAA","ttl":17,"addresses":["2001:db8::1"]}]}
     , "config", &diagnostic);
     defer settings.deinit();
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const canonical = try toDocument(arena.allocator(), &settings);
-    try std.testing.expectEqualStrings("key", canonical.api.?.key_file.?);
-    try std.testing.expectEqualStrings("lists", canonical.api.?.file_root.?);
+    try std.testing.expectEqualStrings("key", canonical.api.key_file.?);
+    try std.testing.expectEqualStrings("lists", canonical.api.file_root.?);
     try std.testing.expectEqualStrings("block.test", canonical.blocks.domains[0]);
     try std.testing.expectEqualStrings("home.test", canonical.records[0].name);
     const json = try std.json.Stringify.valueAlloc(arena.allocator(), canonical, .{ .emit_null_optional_fields = false });
@@ -997,6 +1014,37 @@ test "canonical document round trip retains normalized records rules and managed
     try std.testing.expect(round_trip.definitions.sources.items[0].api_managed);
     try std.testing.expectEqualStrings("one.txt", round_trip.definitions.sources.items[0].source.value);
     try std.testing.expectEqualStrings("config/lists", round_trip.definitions.sources.items[0].access.file_root.?);
-    try std.testing.expectEqualStrings("config/key", round_trip.api.?.key_file.?);
+    try std.testing.expectEqualStrings("config/key", round_trip.api.key_file.?);
     try std.testing.expectEqual(@as(u32, 17), round_trip.records[0].ttl_seconds);
+}
+
+test "HTTP sections are required non-null objects with enabled defaults and UI dependency" {
+    const suffix = ",\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]}}";
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "{\"schema_version\":2,\"ui\":{\"enabled\":false}" ++ suffix, "api" },
+        .{ "{\"schema_version\":2,\"api\":{\"enabled\":false}" ++ suffix, "ui" },
+        .{ "{\"schema_version\":2,\"api\":null,\"ui\":{}" ++ suffix, "api" },
+        .{ "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":null" ++ suffix, "ui" },
+        .{ "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{}" ++ suffix, "ui.enabled" },
+    };
+    var diagnostic: Diagnostic = .{};
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, case[0], ".", &diagnostic));
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), case[1]) != null);
+    }
+    var enabled = try parse(std.testing.allocator, "{\"schema_version\":2,\"api\":{\"key_file\":\"key\"},\"ui\":{}" ++ suffix, ".", &diagnostic);
+    defer enabled.deinit();
+    try std.testing.expect(enabled.api.enabled);
+    try std.testing.expect(enabled.ui.enabled);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var canonical = try toDocument(arena.allocator(), &enabled);
+    try std.testing.expectEqual(@as(u32, 2), canonical.schema_version);
+    try std.testing.expect(canonical.api.enabled and canonical.ui.enabled);
+    canonical.api.enabled = false;
+    try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &canonical, ".", &diagnostic));
+    canonical.ui.enabled = false;
+    var disabled = try fromDocument(std.testing.allocator, &canonical, ".", &diagnostic);
+    defer disabled.deinit();
+    try std.testing.expect(!disabled.api.enabled and !disabled.ui.enabled);
 }

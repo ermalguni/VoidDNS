@@ -6,12 +6,38 @@ release: 1
 section: net
 priority: optional
 maintainer: Ermal Guni
-description: DNS caching forwarder with in-memory filtering and a management API
+description: DNS caching forwarder with in-memory filtering, a management API, and a local web UI
 homepage: ${PROJECT_URL}
 license: MIT
 depends:
   - ca-certificates
-  - caddy
+scripts:
+  postinstall: packaging/scripts/deb-postinstall
+  preremove: packaging/scripts/deb-preremove
+  postremove: packaging/scripts/postremove
+overrides:
+  deb:
+    depends:
+      - ca-certificates
+      - passwd
+      - init-system-helpers
+  rpm:
+    depends:
+      - ca-certificates
+      - shadow-utils
+    scripts:
+      postinstall: packaging/scripts/rpm-postinstall
+      preremove: packaging/scripts/rpm-preremove
+  archlinux:
+    depends:
+      - ca-certificates
+      - shadow
+    scripts:
+      postinstall: packaging/scripts/arch-postinstall
+      preremove: packaging/scripts/arch-preremove
+archlinux:
+  scripts:
+    postupgrade: packaging/scripts/arch-postupgrade
 contents:
   - src: zig-out/bin/VoidDNS
     dst: /usr/bin/VoidDNS
@@ -25,8 +51,11 @@ contents:
     dst: /usr/share/doc/voiddns/examples/voiddns.json
   - src: examples/blocked-domains.txt
     dst: /usr/share/doc/voiddns/examples/blocked-domains.txt
-  - src: ui/dist/
-    dst: /usr/share/voiddns/ui/
-    type: tree
-  - src: ui/Caddyfile
-    dst: /usr/share/doc/voiddns/examples/Caddyfile
+  - src: packaging/voiddns.service
+    dst: /usr/lib/systemd/system/voiddns.service
+    file_info:
+      mode: 0644
+  - src: packaging/scripts/package-setup
+    dst: /usr/lib/voiddns/package-setup
+    file_info:
+      mode: 0755

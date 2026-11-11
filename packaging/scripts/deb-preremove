@@ -1,0 +1,8 @@
+#!/bin/sh
+# prerm also runs on upgrades; leave the running unit alone in that case.
+if [ "${1:-}" = remove ] && command -v systemctl >/dev/null 2>&1; then
+    if [ -d /run/systemd/system ]; then
+        deb-systemd-invoke stop voiddns.service || true
+    fi
+    systemctl disable voiddns.service || true
+fi

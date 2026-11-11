@@ -144,7 +144,7 @@ test "runtime updates preserve cache and rotation unless upstreams or capacity c
     const config = @import("../config/config.zig");
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(std.testing.allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"192.0.2.1"},{"address":"192.0.2.2"}]},"cache":{"capacity":4}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"192.0.2.1"},{"address":"192.0.2.2"}]},"cache":{"capacity":4}}
     , ".", &diagnostic);
     defer previous.deinit();
     var state = State.init(std.testing.allocator);
@@ -206,7 +206,7 @@ test "runtime preparation failure leaves worker resources unchanged" {
     const config = @import("../config/config.zig");
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(std.testing.allocator,
-        \\{"schema_version":1,"upstream":{"servers":[{"address":"192.0.2.1"}]},"cache":{"capacity":4}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"192.0.2.1"}]},"cache":{"capacity":4}}
     , ".", &diagnostic);
     defer previous.deinit();
     var state = State.init(std.testing.allocator);

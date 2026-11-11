@@ -30,8 +30,9 @@ listener is `http://127.0.0.1:8080`.
 
 ## Enablement and authentication
 
-The API is disabled when the startup configuration omits `api`. To enable it,
-add this section to the existing configuration (not as a standalone document):
+Schema version 2 requires non-null `api` and `ui` objects. Both `enabled`
+fields default to `true`; `api.key_file` is required when the API is enabled.
+Merge these sections into the existing configuration (not a standalone document):
 
 ```json
 {
@@ -40,13 +41,26 @@ add this section to the existing configuration (not as a standalone document):
     "listen": {"address": "127.0.0.1", "port": 8080},
     "key_file": "api.key",
     "allow_private_sources": false
-  }
+  },
+  "ui": {"enabled": true}
 }
 ```
 
-Generate a key from 32 random bytes, represented by exactly 64 hexadecimal
-characters. The key file may end in LF or CRLF; POSIX group/other permission bits
-must be zero (use mode `0600`). `key_file` and optional `file_root` resolve
+The UI is embedded in the executable and publicly served on the same listener;
+all `/api/v1` requests remain authenticated. With API/UI enabled respectively:
+`true/true` serves both, `true/false` serves API only (frontend `404`),
+`false/false` serves DNS only with no HTTP listener or key loading, and
+`false/true` is invalid. Missing assets and unknown frontend routes return `404`;
+direct navigation supports `/`, `/domains`, `/records`, `/blocklists`, `/policy`,
+`/settings`, and `/configuration`.
+
+Schema 1 is unsupported; migrate to `schema_version: 2` and explicitly add both
+objects. There is no legacy compatibility mode or implicit disabled API.
+
+Generate a strong random key, for example 32 random bytes represented by 64
+hexadecimal characters, without a trailing newline. The key is the file's exact
+contents: no whitespace, LF, or CRLF trimming is performed. POSIX group/other
+permission bits must be zero (use mode `0600`). `key_file` and optional `file_root` resolve
 relative to the configuration directory. Do not overwrite an existing key merely
 to run an example.
 
@@ -54,8 +68,9 @@ Send exactly one `X-API-Key` header containing the case-sensitive key, without a
 Bearer prefix. Missing, duplicate, or incorrect keys return `401`. Every key has
 administrator privileges, including access to the OpenAPI endpoint.
 
-API settings and key rotation require restart. Live updates changing API
-settings are rejected. There is no built-in TLS or CORS: use HTTPS termination
+API/UI settings, the shared HTTP listener, and key rotation require restart.
+Live updates changing API/UI settings are rejected before save or publication.
+There is no built-in TLS or CORS: use HTTPS termination
 and network controls for remote access. Browser clients need a suitable
 same-origin deployment, not an administrator key in a public bundle.
 
@@ -225,22 +240,23 @@ Settings contains all four required sections:
 ```
 
 PUT `/settings` replaces these sections while retaining records, explicit rules,
-source definitions, and API settings. Ports are 1–65535; transport addresses are
+source definitions, and API/UI settings. Ports are 1–65535; transport addresses are
 IPv4 literals; upstream servers must be nonempty. Timeout is a positive u32.
 Cache capacity is a nonnegative integer fitting `usize`, counts slots rather than
 bytes, and zero disables caching. Log levels: `err`, `warn`, `info`, `debug`.
 Nested omitted settings use their configuration defaults; this is not a merge.
 
-Config uses schema version 1 and requires `schema_version` and
-`upstream.servers`. It contains the Settings sections plus optional `api`,
+Config uses schema version 2 and requires `schema_version`, non-null `api` and
+`ui` objects, and `upstream.servers`. It contains the Settings sections plus optional
 `records`, `blocks: {domains, lists}`, and `allows: {domains}`. See the
 [configuration reference](README.md#startup-configuration) and
 [complete example](examples/voiddns.json) for defaults and startup usage.
 
 GET `/config` returns the canonical **active** document. PUT replaces the whole
 configuration; omitted optional collections become empty. Preserve the existing
-API settings because changing them requires restart. Validation alone does not
-prove that source downloads, file access, persistence, or activation will succeed.
+API/UI settings because changing them requires restart and is rejected before
+saving or publishing. Validation alone does not prove that source downloads,
+file access, persistence, or activation will succeed.
 
 Rule/record/source changes preserve the DNS listener and cache. Upstream server
 changes clear cache; timeout-only changes preserve it. Capacity changes replace
@@ -377,7 +393,7 @@ error enum. Operation failures instead use the Operation `error` string.
 | `404` | Unknown route/resource or missing/evicted operation; inspect current state |
 | `405` | Unsupported method; use the endpoint table |
 | `408` | Request timeout; inspect state before retrying a write |
-| `409` | Busy writer, duplicate identity, stale cursor, or API restart required; handle the specific cause |
+| `409` | Busy writer, duplicate identity, stale cursor, or API/UI restart required; handle the specific cause |
 | `412` | Revision mismatch; reread state and reconsider the intended change |
 | `413` | Body exceeds limit; reduce request size |
 | `428` | Missing `If-Match`; read current revision |
@@ -400,7 +416,7 @@ KEY_FILE=/path/to/api.key
 umask 077
 AUTH=$(mktemp)
 trap 'rm -f "$AUTH"' EXIT
-printf 'X-API-Key: %s\n' "$(tr -d '\r\n' < "$KEY_FILE")" > "$AUTH"
+printf 'X-API-Key: %s\n' "$(cat "$KEY_FILE")" > "$AUTH"
 
 REV=$(curl --fail-with-body -sS -H @"$AUTH" "$API/status" | jq -er '.revision')
 ACCEPTED=$(curl --fail-with-body -sS -H @"$AUTH" \

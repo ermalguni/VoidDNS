@@ -167,7 +167,7 @@ function settingsBody(draft: SettingsDraft) {
 export function SettingsPage() {
   const api = useApi();
   const query = useQuery({ queryKey: ['/settings'], queryFn: ({ signal }) => api.read<Schema<'Settings'>>('/settings', signal) });
-  return <Stack gap="xl"><PageHeading title="Settings" description="Replace runtime settings without changing rules, records, blocklists, or API access." /><ErrorNotice error={query.error} />{query.isPending ? <Loader aria-label="Loading settings" /> : query.data ? <SettingsEditor initial={query.data} /> : <Button variant="default" onClick={() => void query.refetch()}>Retry loading settings</Button>}</Stack>;
+  return <Stack gap="xl"><PageHeading title="Settings" description="Replace runtime settings without changing rules, records, blocklists, or API and UI configuration." /><ErrorNotice error={query.error} />{query.isPending ? <Loader aria-label="Loading settings" /> : query.data ? <SettingsEditor initial={query.data} /> : <Button variant="default" onClick={() => void query.refetch()}>Retry loading settings</Button>}</Stack>;
 }
 
 function SettingsEditor({ initial }: { initial: Snapshot<Schema<'Settings'>> }) {
@@ -283,7 +283,7 @@ function ConfigurationEditor({ initial }: { initial: Snapshot<Schema<'Config'>> 
   }
   return <Stack gap="lg">
     <DraftGuard dirty={dirty} />
-    <Alert color="blue" title="Active configuration, not raw disk contents">This document is the canonical running configuration. A replacement saves the entire document: omitted collections become empty. Preserve the API section; changing API settings requires a restart.</Alert>
+    <Alert color="blue" title="Active configuration, not raw disk contents">This document is the canonical running configuration. A replacement saves the entire document: omitted collections become empty. Only schema_version 2 is supported; non-null api and ui objects are required. Both enabled flags default to true, and UI enabled requires API enabled. Preserve both sections: API and UI settings, including the shared HTTP listener, require a service restart. Live changes are rejected before saving or publication.</Alert>
     <Group justify="space-between"><Group gap="xs"><Text size="sm">Viewed revision <Code>{base.etag}</Code></Text>{dirty && <Badge color="orange" variant="light">Unsaved draft</Badge>}</Group><Button variant="default" loading={reading} disabled={writer.busy || validating} onClick={() => void refresh()}>Refresh active document for review</Button></Group>
     <ErrorNotice error={error} />
     {completed && <Alert color="teal" title="Operation completed">{completed} Refresh and review active state before another write.</Alert>}
