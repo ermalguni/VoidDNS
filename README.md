@@ -138,21 +138,31 @@ sudo pacman -U ./voiddns*.pkg.tar.zst
 
 Packages install `/usr/bin/VoidDNS`, documentation, the MIT license, examples,
 and one `voiddns.service`. They require `ca-certificates` for HTTPS blocklist
-downloads. No active configuration or generated credentials are installed.
+downloads. Installation also copies `voiddns.json` and `blocked-domains.txt` into
+`/etc/voiddns` and generates a unique 256-bit hexadecimal API key in
+`/etc/voiddns/api.key` (no trailing newline). The directory is mode `0750`; new
+configuration, blocklist, and key files are mode `0600`, owned by `voiddns`.
+Existing files, including credentials, are never overwritten on installation
+or upgrade. The public development key in `examples/api.key` is not installed.
+
 The service runs as `User=voiddns`, with working and configuration directory
 `/etc/voiddns`, and only the DNS bind capability (`CAP_NET_BIND_SERVICE`).
-Its `ConditionPathExists=/etc/voiddns/voiddns.json` prevents unconfigured startup.
-Installation enables the service, but no process starts until that file exists.
+Installation enables and starts it when systemd is running. The example binds
+DNS to `127.0.0.1:53` and the UI/API to `127.0.0.1:8080`; enabled URL blocklists
+require network access at startup. A port already in use or an unavailable
+source can prevent startup.
 
-Copy both example files into `/etc/voiddns`, edit the JSON, and create a private
-`api.key` owned by the service account with mode `0600`. Keep the operator-managed
-configuration private to the service. The directory and JSON must be writable by
-`voiddns` for API saves: atomic replacement creates a temporary file in the same
-directory. Then start the single service:
+Open `http://127.0.0.1:8080` and use the generated key to authenticate.
+To display it:
 
 ```sh
-sudo systemctl enable --now voiddns.service
+sudo cat /etc/voiddns/api.key; printf '\n'
 ```
+
+Edit `/etc/voiddns/voiddns.json` to customize listeners, upstreams, and filtering,
+then run `sudo systemctl restart voiddns.service`. Keep the directory and JSON
+writable by `voiddns` for API saves: atomic replacement creates a temporary file
+in the same directory.
 
 Binding port 53 requires appropriate privileges; use port 5353 for an
 unprivileged smoke test. For the standalone archive, extract it and run

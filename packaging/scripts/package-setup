@@ -10,6 +10,24 @@ fi
 if [ ! -e /etc/voiddns ]; then
     install -d -m 0750 -o voiddns -g voiddns /etc/voiddns
 fi
+for file in voiddns.json blocked-domains.txt; do
+    if [ ! -e "/etc/voiddns/$file" ] && [ ! -L "/etc/voiddns/$file" ]; then
+        install -m 0600 -o voiddns -g voiddns \
+            "/usr/share/doc/voiddns/examples/$file" "/etc/voiddns/$file"
+    fi
+done
+if [ ! -e /etc/voiddns/api.key ] && [ ! -L /etc/voiddns/api.key ]; then
+    # Generate a per-install key, never the publicly known development key.
+    umask 077
+    key_file=$(mktemp /etc/voiddns/.api.key.XXXXXX)
+    trap 'rm -f "$key_file"' EXIT
+    key=$(od -An -N32 -tx1 /dev/urandom)
+    printf '%s' "$key" | tr -d ' \n' > "$key_file"
+    install -m 0600 -o voiddns -g voiddns "$key_file" /etc/voiddns/api.key
+    rm -f "$key_file"
+    trap - EXIT
+    unset key
+fi
 if ! command -v systemctl >/dev/null 2>&1; then exit 0; fi
 # Retire the previous separate UI service when upgrading an older package.
 if [ -L /etc/systemd/system/multi-user.target.wants/voiddns-ui.service ] ||
