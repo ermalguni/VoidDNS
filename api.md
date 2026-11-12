@@ -239,6 +239,12 @@ Settings contains all four required sections:
 }
 ```
 
+The optional `dns.tcp` object contains positive-u32 `max_connections` (64),
+`idle_timeout_ms` (10000), `read_timeout_ms` (5000), and `write_timeout_ms` (5000).
+GET returns explicit defaults; PUT/settings and complete configuration saves
+persist them. Live changes affect new TCP connections without rebinding;
+existing connections retain their admission-time settings.
+
 PUT `/settings` replaces these sections while retaining records, explicit rules,
 source definitions, and API/UI settings. Ports are 1–65535; transport addresses are
 IPv4 literals; upstream servers must be nonempty. Timeout is a positive u32.
@@ -346,7 +352,7 @@ Status fields: `dns.ready` (boolean), `dns.generation` (worker generation),
 `dns.listen` (address string), `revision`, `operation_id` (current ID or null),
 and `saved_matches_active` (boolean or null).
 
-Readiness means listener readiness, not upstream health. Saved/active agreement
+Readiness means both UDP and TCP listener readiness, not upstream health. Saved/active agreement
 is last known agreement from this process; it is null during an operation and
 does not detect external file edits.
 
@@ -442,7 +448,7 @@ exit 1
 
 Not implemented: imported allowlists, wildcard/suffix matching, query telemetry
 or history, diagnostic DNS resolution, peer synchronization endpoints, key
-management endpoints, automatic source-refresh scheduling, or incoming DNS TCP.
+management endpoints, or automatic source-refresh scheduling.
 DNS caches and imported contents remain RAM-only.
 
 When changing the API, update this reference, the embedded OpenAPI contract, and

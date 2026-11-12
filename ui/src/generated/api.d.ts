@@ -350,6 +350,18 @@ export interface components {
         };
         Dns: {
             listen?: components["schemas"]["Listener"];
+            tcp?: components["schemas"]["DnsTcp"];
+        };
+        /** @description Incoming DNS TCP limits. Positive u32 values; live changes apply to new connections without restarting the listener. */
+        DnsTcp: {
+            /** @default 64 */
+            max_connections: number;
+            /** @default 10000 */
+            idle_timeout_ms: number;
+            /** @default 5000 */
+            read_timeout_ms: number;
+            /** @default 5000 */
+            write_timeout_ms: number;
         };
         Upstream: {
             servers: {

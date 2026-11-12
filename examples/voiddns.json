@@ -4,6 +4,12 @@
     "listen": {
       "address": "127.0.0.1",
       "port": 53
+    },
+    "tcp": {
+      "max_connections": 64,
+      "idle_timeout_ms": 10000,
+      "read_timeout_ms": 5000,
+      "write_timeout_ms": 5000
     }
   },
   "upstream": {

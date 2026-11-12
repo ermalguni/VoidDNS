@@ -37,6 +37,7 @@ pub fn serve(
                 cache,
                 upstreams,
                 state,
+                .udp,
             ) catch |err| {
                 if (err == error.Canceled) return err;
                 log.warn("resolution failed client={f} id={d}: {s}", .{

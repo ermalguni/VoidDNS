@@ -22,6 +22,7 @@ pub const Document = struct {
             address: []const u8 = "127.0.0.1",
             port: u16 = 53,
         } = .{},
+        tcp: config.Config.Tcp = .{},
     } = .{},
     upstream: struct {
         servers: []const struct {

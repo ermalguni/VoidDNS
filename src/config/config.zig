@@ -31,7 +31,15 @@ pub const Ui = struct {
 
 /// Owns typed configuration definitions and paths, never runtime filtering state.
 pub const Config = struct {
+    pub const Tcp = struct {
+        max_connections: u32 = 64,
+        idle_timeout_ms: u32 = 10000,
+        read_timeout_ms: u32 = 5000,
+        write_timeout_ms: u32 = 5000,
+    };
+
     listen_address: std.Io.net.IpAddress,
+    dns_tcp: Tcp = .{},
     upstream_addresses: []const std.Io.net.IpAddress,
     upstream_timeout_ms: u32,
     cache_capacity: usize,
@@ -140,6 +148,10 @@ pub fn fromDocument(
         return diagnostic.invalid("ui.enabled: requires api.enabled to be true", .{});
     const listen = document.dns.listen;
     const listen_address = try address(listen.address, listen.port, "dns.listen", diagnostic);
+    inline for (@typeInfo(Config.Tcp).@"struct".field_names) |field| {
+        if (@field(document.dns.tcp, field) == 0)
+            return diagnostic.invalid("dns.tcp." ++ field ++ ": expected a positive integer", .{});
+    }
     const servers = document.upstream.servers;
     if (servers.len == 0) return diagnostic.invalid("upstream.servers: expected at least one server", .{});
     if (document.upstream.timeout_ms == 0) return diagnostic.invalid("upstream.timeout_ms: expected a positive timeout", .{});
@@ -200,6 +212,7 @@ pub fn fromDocument(
 
     return .{
         .listen_address = listen_address,
+        .dns_tcp = document.dns.tcp,
         .upstream_addresses = addresses,
         .upstream_timeout_ms = document.upstream.timeout_ms,
         .cache_capacity = document.cache.capacity,
@@ -234,7 +247,7 @@ pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
         .schema_version = 2,
         .api = undefined,
         .ui = self.ui,
-        .dns = .{ .listen = .{ .address = try ip4Text(allocator, self.listen_address.ip4.bytes), .port = self.listen_address.getPort() } },
+        .dns = .{ .listen = .{ .address = try ip4Text(allocator, self.listen_address.ip4.bytes), .port = self.listen_address.getPort() }, .tcp = self.dns_tcp },
         .upstream = .{ .servers = undefined, .timeout_ms = self.upstream_timeout_ms },
         .cache = .{ .capacity = self.cache_capacity },
         .logging = .{ .level = self.log_level },
@@ -1047,4 +1060,31 @@ test "HTTP sections are required non-null objects with enabled defaults and UI d
     var disabled = try fromDocument(std.testing.allocator, &canonical, ".", &diagnostic);
     defer disabled.deinit();
     try std.testing.expect(!disabled.api.enabled and !disabled.ui.enabled);
+}
+
+test "TCP limits reject zero and coercions and retain positive boundaries through documents" {
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"dns\":{\"tcp\":{";
+    inline for (@typeInfo(Config.Tcp).@"struct".field_names) |field| {
+        inline for (.{ "0", "-1", "4294967296", "1.0", "1e1", "\"1\"", "null", "true" }) |value| {
+            try expectInvalid(prefix ++ "\"" ++ field ++ "\":" ++ value ++ "}}}");
+        }
+    }
+    var diagnostic: Diagnostic = .{};
+    var original = try parse(std.testing.allocator, minimal_json, ".", &diagnostic);
+    defer original.deinit();
+    original.dns_tcp = .{ .max_connections = 1, .idle_timeout_ms = 4294967295, .read_timeout_ms = 17, .write_timeout_ms = 23 };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var document = try toDocument(arena.allocator(), &original);
+    const json = try std.json.Stringify.valueAlloc(arena.allocator(), document, .{ .emit_null_optional_fields = false });
+    var restored = try parse(std.testing.allocator, json, ".", &diagnostic);
+    defer restored.deinit();
+    try std.testing.expectEqualDeep(original.dns_tcp, restored.dns_tcp);
+    inline for (@typeInfo(Config.Tcp).@"struct".field_names) |field| {
+        const saved = @field(document.dns.tcp, field);
+        @field(document.dns.tcp, field) = 0;
+        try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), "dns.tcp." ++ field) != null);
+        @field(document.dns.tcp, field) = saved;
+    }
 }

@@ -122,6 +122,10 @@ function integerToken(raw: string, field: string, fallback: number) {
 type SettingsDraft = {
   address: string;
   port: string;
+  maxConnections: string;
+  idleTimeout: string;
+  readTimeout: string;
+  writeTimeout: string;
   servers: { address: string; port: string }[];
   timeout: string;
   capacity: string;
@@ -133,6 +137,10 @@ function settingsDraft(snapshot: Snapshot<Schema<'Settings'>>): SettingsDraft {
   return {
     address: settings.dns.listen?.address ?? '127.0.0.1',
     port: String(settings.dns.listen?.port ?? 53),
+    maxConnections: String(settings.dns.tcp?.max_connections ?? 64),
+    idleTimeout: String(settings.dns.tcp?.idle_timeout_ms ?? 10000),
+    readTimeout: String(settings.dns.tcp?.read_timeout_ms ?? 5000),
+    writeTimeout: String(settings.dns.tcp?.write_timeout_ms ?? 5000),
     servers: settings.upstream.servers.map((server) => ({ address: server.address, port: String(server.port ?? 53) })),
     timeout: String(settings.upstream.timeout_ms ?? 3000),
     capacity: integerToken(snapshot.raw, 'capacity', settings.cache.capacity ?? 4096),
@@ -159,7 +167,13 @@ function settingsBody(draft: SettingsDraft) {
   });
   if (!integer(draft.timeout, 1, 4294967295)) throw new Error('Timeout must be an integer from 1 to 4294967295 milliseconds.');
   if (!integer(draft.capacity, 0)) throw new Error('Cache capacity must be a nonnegative integer, without fractions or exponent notation.');
-  const dns = { listen: { address: draft.address, port: Number(draft.port) } };
+  for (const [label, value] of [['TCP maximum connections', draft.maxConnections], ['TCP idle timeout', draft.idleTimeout], ['TCP read timeout', draft.readTimeout], ['TCP write timeout', draft.writeTimeout]]) {
+    if (!integer(value, 1, 4294967295)) throw new Error(`${label} must be an integer from 1 to 4294967295.`);
+  }
+  const dns = {
+    listen: { address: draft.address, port: Number(draft.port) },
+    tcp: { max_connections: Number(draft.maxConnections), idle_timeout_ms: Number(draft.idleTimeout), read_timeout_ms: Number(draft.readTimeout), write_timeout_ms: Number(draft.writeTimeout) },
+  };
   const upstream = { servers: draft.servers.map((server) => ({ address: server.address, port: Number(server.port) })), timeout_ms: Number(draft.timeout) };
   return new RawJson(`{"dns":${JSON.stringify(dns)},"upstream":${JSON.stringify(upstream)},"cache":{"capacity":${draft.capacity}},"logging":{"level":${JSON.stringify(draft.level)}}}`);
 }
@@ -215,6 +229,17 @@ function SettingsEditor({ initial }: { initial: Snapshot<Schema<'Settings'>> }) 
       <Stack gap="xl">
         <Fieldset legend="DNS listener" disabled={locked}>
           <SimpleGrid cols={{ base: 1, sm: 2 }}><TextInput label="IPv4 address" required value={draft.address} onChange={(event) => update('address', event.currentTarget.value)} description="Listener changes can cause a brief serving gap." /><TextInput label="Port" required inputMode="numeric" value={draft.port} onChange={(event) => update('port', event.currentTarget.value)} description="1–65535" /></SimpleGrid>
+        </Fieldset>
+        <Fieldset legend="DNS TCP limits" disabled={locked}>
+          <Stack gap="md">
+            <Text size="sm" c="dimmed">Changes apply to new connections without restarting the listener. All values must be integers from 1 to 4294967295.</Text>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput label="Maximum connections" required inputMode="numeric" value={draft.maxConnections} onChange={(event) => update('maxConnections', event.currentTarget.value)} />
+              <TextInput label="Idle timeout (milliseconds)" required inputMode="numeric" value={draft.idleTimeout} onChange={(event) => update('idleTimeout', event.currentTarget.value)} />
+              <TextInput label="Read timeout (milliseconds)" required inputMode="numeric" value={draft.readTimeout} onChange={(event) => update('readTimeout', event.currentTarget.value)} />
+              <TextInput label="Write timeout (milliseconds)" required inputMode="numeric" value={draft.writeTimeout} onChange={(event) => update('writeTimeout', event.currentTarget.value)} />
+            </SimpleGrid>
+          </Stack>
         </Fieldset>
         <Fieldset legend="Upstream resolvers" disabled={locked}>
           <Stack gap="md">

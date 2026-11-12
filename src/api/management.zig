@@ -212,6 +212,7 @@ pub const Management = struct {
         plan.commit(self.state, self.settings, candidate);
         if (!runtime.upstreams_changed) std.mem.swap([]const std.Io.net.IpAddress, &self.settings.upstream_addresses, &candidate.upstream_addresses);
         if (runtime.needsLock()) runtime.commit(self.worker);
+        self.worker.setTcp(self.io, candidate.dns_tcp);
         std.mem.swap(config.Config, self.settings, candidate);
         logging.setLevel(self.settings.log_level);
         self.revision += 1;
@@ -295,7 +296,7 @@ pub const Management = struct {
         }
         if (eq(path, "status")) {
             if (!get) return failure(a, 405, "MethodNotAllowed", self.revision);
-            return json(a, 200, .{ .dns = .{ .ready = self.worker.listener != null, .generation = self.worker.generation, .listen = try std.fmt.allocPrint(a, "{f}", .{self.settings.listen_address}) }, .revision = self.revision, .saved_matches_active = if (self.job == null) @as(?bool, self.saved_matches_active) else null, .operation_id = if (self.job) |job| @as(?u64, job.id) else null }, self.revision);
+            return json(a, 200, .{ .dns = .{ .ready = self.worker.listener != null and self.worker.tcp_listener != null, .generation = self.worker.generation, .listen = try std.fmt.allocPrint(a, "{f}", .{self.settings.listen_address}) }, .revision = self.revision, .saved_matches_active = if (self.job == null) @as(?bool, self.saved_matches_active) else null, .operation_id = if (self.job) |job| @as(?u64, job.id) else null }, self.revision);
         }
         if (eq(path, "policy/check")) {
             if (!get) return failure(a, 405, "MethodNotAllowed", self.revision);

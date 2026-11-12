@@ -222,9 +222,9 @@ the configuration mount can be read-only.
 
 #### Docker Compose
 
-The root `compose.yaml` publishes **host UDP port 53** to container UDP port
+The root `compose.yaml` publishes **host UDP and TCP port 53** to container port
 5353, allowing the non-root process to run with all capabilities dropped.
-Host port 53 must be available. TCP DNS is not implemented.
+Host port 53 must be available for both transports.
 
 Compose binds the existing `examples` directory directly. Configure both listeners
 for container networking before starting:
@@ -277,7 +277,7 @@ Compose does not overwrite it on restart. No separate UI image is required.
 For DNS-only operation, set both `api.enabled` and `ui.enabled` to `false`;
 no HTTP listener starts. UI-only operation is invalid.
 
-DNS currently uses UDP only. Signal-based graceful shutdown is not
+DNS accepts UDP and TCP. Signal-based graceful shutdown is not
 implemented; for cooperative shutdown, start with `-i` and append
 `--config /config/voiddns.json --control-stdin`, then send `quit` through stdin.
 
@@ -324,6 +324,10 @@ and each server's `address` are required. Other sections and fields use defaults
 | `schema_version` | Required | `2` only |
 | `dns.listen.address` | `"127.0.0.1"` | IPv4 literal |
 | `dns.listen.port` | `53` | Integer, 1–65535 |
+| `dns.tcp.max_connections` | `64` | Positive u32; excess accepted connections are closed |
+| `dns.tcp.idle_timeout_ms` | `10000` | Positive u32; wait for the first byte of the next frame |
+| `dns.tcp.read_timeout_ms` | `5000` | Positive u32; complete-frame deadline after its first byte |
+| `dns.tcp.write_timeout_ms` | `5000` | Positive u32; complete-response write deadline |
 | `upstream.servers` | Required | Nonempty array of address/port objects |
 | `upstream.servers[].address` | Required | IPv4 literal |
 | `upstream.servers[].port` | `53` | Integer, 1–65535 |
@@ -517,9 +521,9 @@ even when their TTLs agree. `ttl` defaults to 60 seconds and accepts unsigned
 An IN query receives every address in the matching set with the shared TTL,
 not a randomly selected address. If the complete set cannot fit the client's
 UDP limit (512 bytes without EDNS, at least 512 with EDNS), the response contains
-only the question and the TC flag; no partial set is returned. Incoming TCP is
-not implemented, so keep sets small enough for clients that cannot receive the
-complete UDP answer. A missing name/type continues through filtering and
+only the question and the TC flag; no partial set is returned. Clients can retry
+over TCP for the complete set; TCP ignores EDNS's UDP payload limit.
+A missing name/type continues through filtering and
 cache/upstream resolution; an A-only entry does not suppress upstream AAAA.
 Explicit blocks still override local records. Generated answers are not cached.
 
@@ -703,12 +707,34 @@ is rejected.
 
 Only forwarded queries advance the rotation. Cache hits and local answers do not.
 An exchange failure still advances the rotation for the next query; there is no
-automatic retry or failover within a query. `upstream.timeout_ms` controls the
-single response deadline, defaulting to three seconds. Ignored upstream packets
-do not reset that deadline.
+resolver failover within a query. A truncated upstream UDP response retries the
+same resolver over TCP. `upstream.timeout_ms` bounds the entire UDP/TCP exchange,
+including connect, framed writes, and framed reads; ignored packets do not reset it.
 
-The pool is used by the sequential UDP serving loop. Concurrent forwarding would
-require synchronization of its index. Upstream sockets currently use IPv4.
+UDP and TCP clients share the RAM cache and upstream rotation under the worker's
+runtime mutex; resolution remains serialized. Idle clients and response writes
+do not hold that mutex. Upstream sockets currently use IPv4.
+
+### Incoming DNS over TCP
+
+Both DNS listeners use `dns.listen`. Startup requires both binds to succeed.
+TCP supports two-byte big-endian framing, messages up to 65,535 bytes, persistent
+connections, and pipelining processed in request order. Incomplete, invalid, or
+timed-out frames close only their connection. Shutdown and listener replacement
+cooperatively cancel and join all clients.
+
+Each admitted connection owns one reusable 65,535-byte packet buffer; there is
+no per-query transport allocation. Connection limits and deadlines live under
+`dns.tcp`; changes apply to new connections without rebinding. Existing clients
+retain their admission-time settings. Lowering the limit does not evict existing
+clients; no new clients are admitted until the active count is below the limit.
+The kernel backlog and I/O task/socket overhead are additional to packet buffers.
+
+Use `dig +tcp @127.0.0.1 -p 5353 home.test A` to request TCP explicitly.
+Oversized cache/upstream answers sent to UDP clients become question-only TC
+responses; eligible complete upstream answers remain cached (the existing
+4,096-byte cache-entry ceiling still applies). Queries too large for an IPv4 UDP
+datagram are forwarded directly over TCP.
 
 ## DNS cache
 

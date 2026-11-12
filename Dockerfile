@@ -11,6 +11,6 @@ COPY LICENSE /usr/share/licenses/voiddns/LICENSE
 
 WORKDIR /config
 USER 65532:65532
-EXPOSE 5353/udp 8080/tcp
+EXPOSE 5353/udp 5353/tcp 8080/tcp
 ENTRYPOINT ["/usr/local/bin/VoidDNS"]
 CMD ["--config", "/config/voiddns.json"]

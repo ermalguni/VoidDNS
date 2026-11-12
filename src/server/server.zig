@@ -6,6 +6,7 @@ const Cache = @import("../cache/cache.zig");
 const UpstreamPool = @import("../resolver/upstream.zig").Pool;
 const control = @import("control.zig");
 const udp = @import("udp.zig");
+const tcp = @import("tcp.zig");
 
 /// Main owns this context and its borrowed state at stable addresses. The
 /// runtime mutex guards cache/upstream use; acquire it before state.mutex.
@@ -22,6 +23,11 @@ pub const Worker = struct {
     listener: ?std.Io.net.Socket = null,
     future: ?std.Io.Future(anyerror!void) = null,
     generation: u64 = 0,
+    tcp_listener: ?std.Io.net.Server = null,
+    tcp_future: ?std.Io.Future(anyerror!void) = null,
+    tcp_mutex: std.Io.Mutex = .init,
+    tcp_settings: Config.Tcp,
+    tcp_active: u32 = 0,
 
     /// Prepared without the runtime lock. commit cannot fail and leaves the
     /// retired cache here for deinit after publication releases the lock.
@@ -90,11 +96,12 @@ pub const Worker = struct {
             .cache = cache,
             .upstreams = try UpstreamPool.init(settings.upstream_addresses, settings.upstream_timeout_ms),
             .buffer = buffer,
+            .tcp_settings = settings.dns_tcp,
         };
     }
 
     pub fn start(self: *Worker, io: std.Io, generation: u64) !void {
-        std.debug.assert(self.future == null and self.listener == null);
+        std.debug.assert(self.future == null and self.listener == null and self.tcp_listener == null and self.tcp_future == null);
         self.generation = generation;
         self.listener = try self.listen_address.bind(io, .{
             .mode = .dgram,
@@ -104,8 +111,18 @@ pub const Worker = struct {
             self.listener.?.close(io);
             self.listener = null;
         }
+        self.tcp_listener = try self.listen_address.listen(io, .{ .reuse_address = true });
+        errdefer {
+            self.tcp_listener.?.deinit(io);
+            self.tcp_listener = null;
+        }
         self.future = try io.concurrent(run, .{ self, io });
-        std.log.info("DNS listening on {f}; generation={d}", .{ self.listen_address, generation });
+        errdefer {
+            self.future.?.cancel(io) catch {};
+            self.future = null;
+        }
+        self.tcp_future = try io.concurrent(runTcp, .{ self, io });
+        std.log.info("DNS UDP/TCP listening on {f}; generation={d}", .{ self.listen_address, generation });
     }
 
     fn run(self: *Worker, io: std.Io) anyerror!void {
@@ -119,7 +136,32 @@ pub const Worker = struct {
         return error.UnexpectedWorkerExit;
     }
 
+    fn runTcp(self: *Worker, io: std.Io) anyerror!void {
+        tcp.serve(self, io) catch |err| {
+            if (err != error.Canceled)
+                self.mailbox.workerFailed(io, .{ .generation = self.generation, .err = err });
+            return err;
+        };
+        return error.UnexpectedWorkerExit;
+    }
+
+    /// Publication holds runtime/state locks; accept only takes tcp_mutex.
+    /// Existing clients retain the settings snapshot taken at admission.
+    pub fn setTcp(self: *Worker, io: std.Io, settings: Config.Tcp) void {
+        self.tcp_mutex.lockUncancelable(io);
+        defer self.tcp_mutex.unlock(io);
+        self.tcp_settings = settings;
+    }
+
     pub fn stop(self: *Worker, io: std.Io) void {
+        if (self.tcp_future) |*future| {
+            future.cancel(io) catch {};
+            self.tcp_future = null;
+        }
+        if (self.tcp_listener) |*listener| {
+            listener.deinit(io);
+            self.tcp_listener = null;
+        }
         if (self.future) |*future| {
             // cancel requests cooperative cancellation AND joins. The serve
             // path propagates Canceled through idle receive and upstream I/O.
@@ -233,4 +275,34 @@ test "runtime preparation failure leaves worker resources unchanged" {
     var timeout = try Worker.Update.prepare(failing.allocator(), &previous, &candidate);
     defer timeout.deinit();
     try std.testing.expect(timeout.needsLock());
+}
+
+test "TCP bind failure releases UDP and allows restarting retained worker" {
+    const io = std.testing.io;
+    const config = @import("../config/config.zig");
+    var diagnostic: config.Diagnostic = .{};
+    var settings = try config.parse(std.testing.allocator,
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"192.0.2.1"}]}}
+    , ".", &diagnostic);
+    defer settings.deinit();
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    var mailbox: control.Mailbox = .{};
+    var worker = try Worker.init(std.testing.allocator, &settings, &state, &mailbox);
+    defer worker.deinit(io);
+    const loopback = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var occupied = try loopback.listen(io, .{ .reuse_address = true });
+    const address = occupied.socket.address;
+    worker.listen_address = address;
+    const slots = worker.cache.slots.ptr;
+    const result = worker.start(io, 1);
+    occupied.deinit(io);
+    try std.testing.expectError(error.AddressInUse, result);
+    try std.testing.expect(worker.listener == null and worker.tcp_listener == null);
+    try std.testing.expect(worker.future == null and worker.tcp_future == null);
+    try worker.start(io, 2);
+    try std.testing.expectEqual(slots, worker.cache.slots.ptr);
+    try std.testing.expect(worker.listener != null and worker.tcp_listener != null);
+    worker.stop(io);
+    try std.testing.expectEqual(@as(u32, 0), worker.tcp_active);
 }

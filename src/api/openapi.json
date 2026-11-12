@@ -3277,6 +3277,41 @@
         "properties": {
           "listen": {
             "$ref": "#/components/schemas/Listener"
+          },
+          "tcp": {
+            "$ref": "#/components/schemas/DnsTcp"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "DnsTcp": {
+        "type": "object",
+        "description": "Incoming DNS TCP limits. Positive u32 values; live changes apply to new connections without restarting the listener.",
+        "properties": {
+          "max_connections": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "default": 64
+          },
+          "idle_timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "default": 10000
+          },
+          "read_timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "default": 5000
+          },
+          "write_timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "default": 5000
           }
         },
         "required": [],
