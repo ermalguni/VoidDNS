@@ -58,7 +58,7 @@ const Application = struct {
         errdefer allocator.destroy(self);
         self.settings = try manager.load(io, diagnostic);
         errdefer self.settings.deinit();
-        self.state = try self.settings.prepareState(io, diagnostic);
+        self.state = try manager.prepareStartupState(io, &self.settings, diagnostic);
         errdefer self.state.deinit();
         self.state.records = self.settings.records;
         self.worker = try Worker.init(allocator, &self.settings, &self.state, mailbox);

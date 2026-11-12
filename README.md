@@ -148,9 +148,9 @@ or upgrade. The public development key in `examples/api.key` is not installed.
 The service runs as `User=voiddns`, with working and configuration directory
 `/etc/voiddns`, and only the DNS bind capability (`CAP_NET_BIND_SERVICE`).
 Installation enables and starts it when systemd is running. The example binds
-DNS to `127.0.0.1:53` and the UI/API to `127.0.0.1:8080`; enabled URL blocklists
-require network access at startup. A port already in use or an unavailable
-source can prevent startup.
+DNS to `127.0.0.1:53` and the UI/API to `127.0.0.1:8080`. Failed startup blocklist
+imports are logged and disabled in the configuration before startup continues.
+A port already in use or failure to save those changes can prevent startup.
 
 Open `http://127.0.0.1:8080` and use the generated key to authenticate.
 To display it:
@@ -565,11 +565,11 @@ are not supported URL imports. Content-category and whole-service blocking
 lists were not selected. Device lists are disabled by default because they can
 affect device features; enable them individually after reviewing their contents.
 
-The example requires internet access for its enabled URL sources. These feeds
-can overlap with HaGeZi and each other, increasing download time and RAM usage.
-Any enabled source failing to load or parse prevents startup; upstream contents
-can change after validation. Disable unwanted sources rather than assuming all
-Pi-hole lists are compatible. Matching remains exact, including for these feeds.
+The example downloads its enabled URL sources at startup. These feeds can overlap
+with HaGeZi and each other, increasing download time and RAM usage. Failed imports
+are logged and persistently disabled; upstream contents can change after validation.
+Re-enable a source explicitly after fixing it. Disable unwanted sources rather than
+assuming all Pi-hole lists are compatible. Matching remains exact for these feeds.
 
 The file is authoritative, not a seed merged with another store. Apply changes
 through the explicit reload channel above or restart. Omit `blocks` and `allows`
@@ -668,8 +668,15 @@ the policy checks.
 
 ### Ownership, updates, and limits
 
-All enabled lists must load successfully **before binding the listener**. Missing
-files, failed downloads, malformed content, or invalid definitions stop startup.
+Before binding the listener, startup attempts every enabled list. Missing files,
+failed downloads, and malformed content are logged with source ID/name and error,
+without exposing source locations. Failed entries are retained with `enabled: false`
+in RAM and atomically saved to the configuration file; other lists continue loading,
+even if every import fails. Disabled lists provide no blocking protection and must
+be explicitly re-enabled after repair. Invalid configuration, allocation failure,
+cancellation, or failure to save the disabled entries still stops startup.
+Startup only rewrites the file when an enabled import fails; saves use the normal
+canonical formatting and private permissions described above.
 Definitions survive restarts in the configuration file; downloaded snapshots do not.
 Each restart fetches every enabled source. Reload retains unchanged snapshots,
 so unrelated record edits work even when an existing source is unavailable.

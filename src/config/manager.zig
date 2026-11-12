@@ -28,6 +28,28 @@ pub const Manager = struct {
         return config.load(self.allocator, io, self.path, diagnostic);
     }
 
+    /// Startup alone disables failed imports and persists the resulting settings
+    /// before listeners bind. Reload and refresh retain their transactional rules.
+    pub fn prepareStartupState(self: *Manager, io: std.Io, settings: *config.Config, diagnostic: *config.Diagnostic) !@import("../state/state.zig").State {
+        var state = try settings.prepareState(io, diagnostic);
+        errdefer state.deinit();
+        var changed = false;
+        for (settings.definitions.sources.items) |*source| {
+            const loaded = state.lists.sources.get(source.id).?.source;
+            if (source.enabled and !loaded.enabled) {
+                source.enabled = false;
+                changed = true;
+            }
+        }
+        if (changed) {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const candidate = try config.toDocument(arena.allocator(), settings);
+            try self.save(io, &candidate, diagnostic);
+        }
+        return state;
+    }
+
     /// Validate and serialize a typed document before creating any file.
     /// Source definitions are validated, but their files/URLs are never read.
     /// Atomic replacement deliberately gives the new file private 0600 POSIX
@@ -309,4 +331,53 @@ test "failed atomic replacement cleans temporary and retains destination" {
     var iterator = tmp.dir.iterate();
     try std.testing.expectEqualStrings("config.json", (try iterator.next(io)).?.name);
     try std.testing.expect((try iterator.next(io)) == null);
+}
+
+test "startup disables failed imports durably and continues with healthy sources" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.txt", .data = "partial.test\n||invalid.test^\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "good.txt", .data = "healthy.test\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},
+        \\"upstream":{"servers":[{"address":"1.1.1.1"}]},
+        \\"blocks":{"domains":["explicit.test"],"lists":[
+        \\{"id":"missing","source":{"kind":"file","value":"missing.txt"},"format":"domains"},
+        \\{"id":"bad","source":{"kind":"file","value":"bad.txt"},"format":"domains"},
+        \\{"id":"good","source":{"kind":"file","value":"good.txt"},"format":"domains"},
+        \\{"id":"off","enabled":false,"source":{"kind":"file","value":"missing.txt"},"format":"domains"}]},
+        \\"allows":{"domains":["allowed.test"]},
+        \\"records":[{"name":"local.test","type":"A","addresses":["192.0.2.1"]}]}
+    });
+    const path = try tmp.dir.realPathFileAlloc(io, "config.json", allocator);
+    defer allocator.free(path);
+    var manager = try Manager.init(allocator, path);
+    defer manager.deinit();
+    var diagnostic: config.Diagnostic = .{};
+    var settings = try manager.load(io, &diagnostic);
+    defer settings.deinit();
+    var state = try manager.prepareStartupState(io, &settings, &diagnostic);
+    defer state.deinit();
+    try std.testing.expect(state.lists.contains("healthy.test"));
+    try std.testing.expect(!state.lists.contains("partial.test"));
+    try std.testing.expect(state.domains.isBlocked("explicit.test"));
+    try std.testing.expect(state.domains.isAllowed("allowed.test"));
+    var saved = try manager.load(io, &diagnostic);
+    defer saved.deinit();
+    for (saved.definitions.sources.items, settings.definitions.sources.items) |persisted, active| {
+        const expected = std.mem.eql(u8, active.id, "good");
+        try std.testing.expectEqual(expected, active.enabled);
+        try std.testing.expectEqual(expected, persisted.enabled);
+        try std.testing.expectEqual(expected, state.lists.sources.get(active.id).?.source.enabled);
+    }
+    try std.testing.expectEqualStrings("local.test", saved.records[0].name);
+    try std.testing.expectEqual([4]u8{ 192, 0, 2, 1 }, saved.records[0].addresses.a[0]);
+    // Repairing a source does not silently re-enable it on the next startup.
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.txt", .data = "repaired.test\n" });
+    var restarted = try manager.prepareStartupState(io, &saved, &diagnostic);
+    defer restarted.deinit();
+    try std.testing.expect(!restarted.lists.contains("repaired.test"));
+    try std.testing.expect(restarted.lists.contains("healthy.test"));
 }
