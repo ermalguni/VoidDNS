@@ -43,6 +43,7 @@ pub const Config = struct {
     upstream_addresses: []const std.Io.net.IpAddress,
     upstream_timeout_ms: u32,
     cache_capacity: usize,
+    cache_min_positive_ttl_seconds: u32 = 0,
     log_level: std.log.Level,
     allocator: std.mem.Allocator,
     definitions: Definitions,
@@ -216,6 +217,7 @@ pub fn fromDocument(
         .upstream_addresses = addresses,
         .upstream_timeout_ms = document.upstream.timeout_ms,
         .cache_capacity = document.cache.capacity,
+        .cache_min_positive_ttl_seconds = document.cache.min_positive_ttl_seconds,
         .log_level = document.logging.level,
         .allocator = allocator,
         .definitions = definitions,
@@ -249,7 +251,7 @@ pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
         .ui = self.ui,
         .dns = .{ .listen = .{ .address = try ip4Text(allocator, self.listen_address.ip4.bytes), .port = self.listen_address.getPort() }, .tcp = self.dns_tcp },
         .upstream = .{ .servers = undefined, .timeout_ms = self.upstream_timeout_ms },
-        .cache = .{ .capacity = self.cache_capacity },
+        .cache = .{ .capacity = self.cache_capacity, .min_positive_ttl_seconds = self.cache_min_positive_ttl_seconds },
         .logging = .{ .level = self.log_level },
     };
     const Server = std.meta.Elem(@FieldType(@FieldType(Document, "upstream"), "servers"));
@@ -496,6 +498,18 @@ test "timeout and capacity enforce integer ranges without coercion" {
             std.testing.allocator,
             "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}]}},\"cache\":{{\"capacity\":{s}}}}}",
             .{capacity},
+        );
+        defer std.testing.allocator.free(input);
+        try expectInvalid(input);
+    }
+}
+
+test "minimum positive cache TTL rejects invalid integers" {
+    for ([_][]const u8{ "-1", "4294967296", "\"300\"", "1.5", "3e2", "null", "true" }) |value| {
+        const input = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"schema_version\":2,\"api\":{{\"enabled\":false}},\"ui\":{{\"enabled\":false}},\"upstream\":{{\"servers\":[{{\"address\":\"1.1.1.1\"}}]}},\"cache\":{{\"min_positive_ttl_seconds\":{s}}}}}",
+            .{value},
         );
         defer std.testing.allocator.free(input);
         try expectInvalid(input);

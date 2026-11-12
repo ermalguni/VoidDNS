@@ -373,6 +373,11 @@ export interface components {
         };
         CacheSettings: {
             capacity?: number;
+            /**
+             * @description Minimum internal retention in seconds for cacheable positive upstream responses; 0 respects the original packet lifetime. Reuse lasts until the greater of the original packet lifetime and this minimum, which can serve stale destinations. Zero-TTL packets remain noncacheable, and negative NXDOMAIN/NODATA responses (including CNAME plus SOA) are unchanged. Client TTLs age from their original values and floor at zero; this setting never extends them. Changing this value clears the response cache.
+             * @default 0
+             */
+            min_positive_ttl_seconds: number;
         };
         Logging: {
             /** @enum {unknown} */

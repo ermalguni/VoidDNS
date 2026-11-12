@@ -333,6 +333,7 @@ and each server's `address` are required. Other sections and fields use defaults
 | `upstream.servers[].port` | `53` | Integer, 1–65535 |
 | `upstream.timeout_ms` | `3000` | Integer, 1–4294967295 |
 | `cache.capacity` | `4096` | Nonnegative integer fitting `usize`; zero disables caching |
+| `cache.min_positive_ttl_seconds` | `0` | Integer, 0–4294967295; minimum internal positive-response retention, zero respects upstream TTL |
 | `logging.level` | `"info"` | `"err"`, `"warn"`, `"info"`, `"debug"` |
 | `records` | `[]` | Local IN A/AAAA record sets; see below |
 | `api` | Required non-null object | Shared management HTTP configuration |
@@ -442,6 +443,7 @@ Every completed management operation advances its revision.
 | Upstream timeout changed | Update the pool timeout at a query boundary, retaining cache and rotation |
 | Upstream servers changed | Replace the pool and clear the upstream response cache |
 | Cache capacity changed | Replace only the cache; zero disables it |
+| Minimum positive cache TTL changed | Replace only the cache, clearing existing responses and applying the new retention policy |
 | Listener address/port changed | Cancel/join and rebind the worker, retaining unchanged resources |
 
 **Reload is not refresh.** An unchanged file path or URL retains its last imported
@@ -740,8 +742,19 @@ datagram are forwarded directly over TCP.
 
 Responses are looked up in the RAM cache only after filtering policy and local
 answers. Only upstream responses are inserted. `cache.capacity` configures the
-slot count; record TTLs determine expiry.
-Hits age returned TTLs without extending expiry.
+slot count. By default, record TTLs determine expiry.
+`cache.min_positive_ttl_seconds` optionally raises the internal lifetime of a
+cacheable positive response to at least this many seconds. For example, `300`
+reuses a response with a 60-second lifetime for up to 300 seconds, unless evicted.
+Hits never renew that lifetime. Returned record TTLs still age from their original
+values and saturate at zero; the setting does not extend client caching.
+
+The default `0` respects upstream TTLs. Zero-TTL packets remain non-cacheable,
+and NXDOMAIN/NODATA responses (including CNAME chains with SOA) keep their
+SOA-derived limits. Longer retention reduces upstream traffic but can serve stale
+destinations and delay failover or DNS changes. Configure it in the JSON file,
+through `PUT /api/v1/settings` or `PUT /api/v1/config`, or in the UI's Settings
+cache section. Changing it clears existing cached responses.
 
 The cache uses direct-mapped slots and exact-sized packet storage. Hash collisions
 replace entries. Responses larger than 4096 bytes, queries with EDNS options
@@ -749,8 +762,9 @@ other than COOKIE, transaction-authenticated responses, and truncated responses
 bypass caching.
 
 Negative responses require an authority SOA and respect its negative-cache TTL.
-The cache belongs to one sequential DNS worker and is replaced on successful
-reload. Concurrent access within a worker would require synchronization.
+The cache belongs to one sequential DNS worker, with concurrent management access
+guarded by the runtime mutex. Reload preserves it unless upstream servers,
+capacity, or minimum positive retention change.
 
 Cache responsibilities are split across three files:
 

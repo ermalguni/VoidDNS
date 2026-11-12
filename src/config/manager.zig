@@ -115,7 +115,7 @@ test "manager owns its path and saves valid definitions without source IO" {
         .ui = .{ .enabled = false },
         .dns = .{ .listen = .{ .address = "127.0.0.2", .port = 5353 } },
         .upstream = .{ .servers = &.{.{ .address = "8.8.8.8", .port = 9953 }}, .timeout_ms = 1250 },
-        .cache = .{ .capacity = 17 },
+        .cache = .{ .capacity = 17, .min_positive_ttl_seconds = std.math.maxInt(u32) },
         .logging = .{ .level = .debug },
         .blocks = .{
             .domains = &.{"BLOCKED.Example."},
@@ -140,6 +140,7 @@ test "manager owns its path and saves valid definitions without source IO" {
     try std.testing.expectEqual(@as(u16, 9953), loaded.upstream_addresses[0].ip4.port);
     try std.testing.expectEqual(@as(u32, 1250), loaded.upstream_timeout_ms);
     try std.testing.expectEqual(@as(usize, 17), loaded.cache_capacity);
+    try std.testing.expectEqual(std.math.maxInt(u32), loaded.cache_min_positive_ttl_seconds);
     try std.testing.expectEqual(std.log.Level.debug, loaded.log_level);
     try std.testing.expectEqualStrings("blocked.example", loaded.definitions.blocks.items[0]);
     try std.testing.expectEqualStrings("allowed.example", loaded.definitions.allows.items[0]);

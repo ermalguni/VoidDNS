@@ -16,7 +16,7 @@ key_len: u16,
 packet_len: u16,
 ttl_count: u16,
 
-pub fn init(allocator: std.mem.Allocator, k: []const u8, response: []const u8, now: i64) !?Entry {
+pub fn init(allocator: std.mem.Allocator, k: []const u8, response: []const u8, now: i64, min_positive_ttl_seconds: u32) !?Entry {
     var offsets: [max_records]u16 = undefined;
     const info = inspect(k, response, &offsets) catch |err| {
         log.debug("insertion bypass: {s} bytes={d}", .{ @errorName(err), response.len });
@@ -35,13 +35,14 @@ pub fn init(allocator: std.mem.Allocator, k: []const u8, response: []const u8, n
             std.mem.writeInt(u32, bytes[k.len + offset ..][0..4], ttl, .big);
         }
     }
+    const lifetime = if (info.soa_limited) info.lifetime else @max(info.lifetime, min_positive_ttl_seconds);
     log.debug("inserted id={d} bytes={d} ttl={d}s soa_limited={}", .{
-        u16At(response, 0), response.len, info.lifetime, info.soa_limited,
+        u16At(response, 0), response.len, lifetime, info.soa_limited,
     });
     return .{
         .bytes = bytes,
         .inserted = now,
-        .lifetime = info.lifetime,
+        .lifetime = lifetime,
         .key_len = @intCast(k.len),
         .packet_len = @intCast(response.len),
         .ttl_count = @intCast(info.count),
@@ -65,7 +66,7 @@ pub fn replay(self: Entry, id: u16, elapsed: u32, out: []u8) []const u8 {
     std.mem.writeInt(u16, out[0..2], id, .big);
     for (0..self.ttl_count) |i| {
         const offset = u16At(self.bytes, packet_end + i * 2);
-        const ttl = u32At(packet, offset) - elapsed;
+        const ttl = u32At(packet, offset) -| elapsed;
         std.mem.writeInt(u32, out[offset..][0..4], ttl, .big);
     }
     return out[0..packet.len];

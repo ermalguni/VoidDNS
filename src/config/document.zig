@@ -33,6 +33,7 @@ pub const Document = struct {
     },
     cache: struct {
         capacity: usize = 4096,
+        min_positive_ttl_seconds: u32 = 0,
     } = .{},
     logging: struct {
         level: std.log.Level = .info,

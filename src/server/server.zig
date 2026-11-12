@@ -52,8 +52,11 @@ pub const Worker = struct {
             } else if (previous.upstream_timeout_ms != candidate.upstream_timeout_ms) {
                 update.timeout = .{ .raw = .fromMilliseconds(candidate.upstream_timeout_ms), .clock = .awake };
             }
-            if (upstreams_changed or previous.cache_capacity != candidate.cache_capacity) {
+            if (upstreams_changed or previous.cache_capacity != candidate.cache_capacity or
+                previous.cache_min_positive_ttl_seconds != candidate.cache_min_positive_ttl_seconds)
+            {
                 update.cache = try Cache.init(allocator, candidate.cache_capacity);
+                update.cache.?.min_positive_ttl_seconds = candidate.cache_min_positive_ttl_seconds;
             }
             return update;
         }
@@ -86,6 +89,7 @@ pub const Worker = struct {
     ) !Worker {
         var cache = try Cache.init(allocator, settings.cache_capacity);
         errdefer cache.deinit();
+        cache.min_positive_ttl_seconds = settings.cache_min_positive_ttl_seconds;
         const buffer = try allocator.alloc(u8, message.packet_capacity);
         errdefer allocator.free(buffer);
         return .{
@@ -182,23 +186,24 @@ pub const Worker = struct {
     }
 };
 
-test "runtime updates preserve cache and rotation unless upstreams or capacity change" {
+test "runtime updates preserve cache and rotation unless upstreams or cache settings change" {
     const config = @import("../config/config.zig");
     var diagnostic: config.Diagnostic = .{};
     var previous = try config.parse(std.testing.allocator,
-        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"192.0.2.1"},{"address":"192.0.2.2"}]},"cache":{"capacity":4}}
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"192.0.2.1"},{"address":"192.0.2.2"}]},"cache":{"capacity":4,"min_positive_ttl_seconds":30}}
     , ".", &diagnostic);
     defer previous.deinit();
     var state = State.init(std.testing.allocator);
     defer state.deinit();
     var mailbox: control.Mailbox = .{};
-    const cases = [_]enum { unchanged, timeout, capacity, order, port, count }{
-        .unchanged, .timeout, .capacity, .order, .port, .count,
+    const cases = [_]enum { unchanged, timeout, capacity, minimum, order, port, count }{
+        .unchanged, .timeout, .capacity, .minimum, .order, .port, .count,
     };
     for (cases) |case| {
         var worker = try Worker.init(std.testing.allocator, &previous, &state, &mailbox);
         defer worker.deinit(std.testing.io);
         worker.upstreams.next_index = 1;
+        try std.testing.expectEqual(previous.cache_min_positive_ttl_seconds, worker.cache.min_positive_ttl_seconds);
         const old_slots = worker.cache.slots.ptr;
         const old_addresses = worker.upstreams.addresses.ptr;
         const query = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" ++
@@ -217,12 +222,13 @@ test "runtime updates preserve cache and rotation unless upstreams or capacity c
             .unchanged => {},
             .timeout => candidate.upstream_timeout_ms = 4500,
             .capacity => candidate.cache_capacity = 8,
+            .minimum => candidate.cache_min_positive_ttl_seconds = 300,
             .order => std.mem.swap(std.Io.net.IpAddress, &addresses[0], &addresses[1]),
             .port => addresses[0].ip4.port = 5353,
             .count => candidate.upstream_addresses = addresses[0..1],
         }
         const upstreams_changed = case == .order or case == .port or case == .count;
-        const cache_changed = upstreams_changed or case == .capacity;
+        const cache_changed = upstreams_changed or case == .capacity or case == .minimum;
         var update = try Worker.Update.prepare(std.testing.allocator, &previous, &candidate);
         defer update.deinit();
         try std.testing.expectEqual(upstreams_changed, update.upstreams_changed);
@@ -236,6 +242,7 @@ test "runtime updates preserve cache and rotation unless upstreams or capacity c
             update.commit(&worker);
         }
         try std.testing.expectEqual(candidate.cache_capacity, worker.cache.slots.len);
+        try std.testing.expectEqual(candidate.cache_min_positive_ttl_seconds, worker.cache.min_positive_ttl_seconds);
         try std.testing.expectEqual(!cache_changed, old_slots == worker.cache.slots.ptr);
         try std.testing.expectEqual(!cache_changed, worker.cache.get(query, 0, &answer_buffer) != null);
         try std.testing.expectEqual(@as(usize, if (upstreams_changed) 0 else 1), worker.upstreams.next_index);
@@ -265,6 +272,12 @@ test "runtime preparation failure leaves worker resources unchanged" {
     try std.testing.expectEqual(slots, worker.cache.slots.ptr);
     try std.testing.expectEqual(previous.upstream_addresses.ptr, worker.upstreams.addresses.ptr);
     try std.testing.expectEqual(@as(i64, previous.upstream_timeout_ms), worker.upstreams.response_timeout.raw.toMilliseconds());
+
+    candidate = previous;
+    candidate.cache_min_positive_ttl_seconds = 300;
+    try std.testing.expectError(error.OutOfMemory, Worker.Update.prepare(failing.allocator(), &previous, &candidate));
+    try std.testing.expectEqual(slots, worker.cache.slots.ptr);
+    try std.testing.expectEqual(previous.cache_min_positive_ttl_seconds, worker.cache.min_positive_ttl_seconds);
 
     // Unchanged and timeout-only plans require no allocations.
     candidate = previous;

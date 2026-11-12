@@ -20,7 +20,8 @@
     "timeout_ms": 3000
   },
   "cache": {
-    "capacity": 4096
+    "capacity": 8192,
+    "min_positive_ttl_seconds": 900
   },
   "logging": {
     "level": "debug"

@@ -234,7 +234,7 @@ Settings contains all four required sections:
 {
   "dns":{"listen":{"address":"127.0.0.1","port":5353}},
   "upstream":{"servers":[{"address":"1.1.1.1","port":53}],"timeout_ms":3000},
-  "cache":{"capacity":4096},
+  "cache":{"capacity":4096,"min_positive_ttl_seconds":0},
   "logging":{"level":"info"}
 }
 ```
@@ -251,6 +251,17 @@ IPv4 literals; upstream servers must be nonempty. Timeout is a positive u32.
 Cache capacity is a nonnegative integer fitting `usize`, counts slots rather than
 bytes, and zero disables caching. Log levels: `err`, `warn`, `info`, `debug`.
 Nested omitted settings use their configuration defaults; this is not a merge.
+
+`cache.min_positive_ttl_seconds` is an optional u32 (0–4294967295), default `0`.
+It raises internal reuse of cacheable positive upstream responses to at least the
+configured duration, without renewing on hits or extending client TTLs. Client
+TTLs age from their original values and saturate at zero. Zero-TTL packets remain
+non-cacheable; NXDOMAIN/NODATA lifetimes are unchanged. Larger values reduce
+upstream requests but can serve stale destinations and delay failover. Changing
+the value clears existing cached responses without restarting the DNS listener.
+GET `/settings` and `/config` return it; PUT on either endpoint persists and
+activates it through the usual revision/operation flow. The UI exposes it under
+Settings → Cache as “Minimum positive retention (seconds)”.
 
 Config uses schema version 2 and requires `schema_version`, non-null `api` and
 `ui` objects, and `upstream.servers`. It contains the Settings sections plus optional

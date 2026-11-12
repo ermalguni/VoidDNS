@@ -6,6 +6,7 @@ const log = std.log.scoped(.cache);
 
 allocator: std.mem.Allocator,
 slots: []?Entry,
+min_positive_ttl_seconds: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator, capacity: usize) !Cache {
     const slots = try allocator.alloc(?Entry, capacity);
@@ -92,7 +93,7 @@ pub fn put(self: *Cache, k: []const u8, response: []const u8, now: i64) !void {
         return;
     }
 
-    const entry = try Entry.init(self.allocator, k, response, now) orelse return;
+    const entry = try Entry.init(self.allocator, k, response, now, self.min_positive_ttl_seconds) orelse return;
 
     const slot = self.slotFor(k);
     if (slot.*) |old| {
@@ -101,4 +102,81 @@ pub fn put(self: *Cache, k: []const u8, response: []const u8, now: i64) !void {
     }
 
     slot.* = entry;
+}
+
+test "positive minimum extends reuse without extending original record TTLs" {
+    const query = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" ++
+        "\x04home\x04test\x00\x00\x01\x00\x01";
+    const response = "\x12\x34\x81\x80\x00\x01\x00\x02\x00\x00\x00\x00" ++
+        query[12..] ++
+        "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x0a\x00\x04\xc0\x00\x02\x01" ++
+        "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x14\x00\x04\xc0\x00\x02\x02";
+    for ([_]u32{ 0, 5, 30, std.math.maxInt(u32) }) |minimum| {
+        var cache = try Cache.init(std.testing.allocator, 1);
+        defer cache.deinit();
+        cache.min_positive_ttl_seconds = minimum;
+        try cache.put(Key.fromQuery(query).?, response, 100);
+        var out: [512]u8 = undefined;
+        for ([_]u32{ 0, 5, 10, 20 }) |age| {
+            if (age >= @max(@as(u32, 10), minimum)) continue;
+            const replay = cache.get(query, 100 + @as(i64, age), &out).?;
+            try std.testing.expectEqual(@as(u32, 10) -| age, std.mem.readInt(u32, replay[query.len + 6 ..][0..4], .big));
+            try std.testing.expectEqual(@as(u32, 20) -| age, std.mem.readInt(u32, replay[query.len + 22 ..][0..4], .big));
+        }
+        const lifetime: i64 = @max(@as(u32, 10), minimum);
+        const last = cache.get(query, 100 + lifetime - 1, &out).?;
+        try std.testing.expectEqual(@as(u32, 10) -| @as(u32, @intCast(lifetime - 1)), std.mem.readInt(u32, last[query.len + 6 ..][0..4], .big));
+        try std.testing.expect(cache.get(query, 100 + lifetime, &out) == null);
+    }
+}
+
+test "positive minimum never makes zero TTL packets cacheable" {
+    const query = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" ++
+        "\x04home\x04test\x00\x00\x01\x00\x01";
+    const response = "\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00" ++
+        query[12..] ++
+        "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x00\x00\x04\xc0\x00\x02\x01";
+    var cache = try Cache.init(std.testing.allocator, 1);
+    defer cache.deinit();
+    cache.min_positive_ttl_seconds = std.math.maxInt(u32);
+    try cache.put(Key.fromQuery(query).?, response, 0);
+    try std.testing.expectEqual(@as(usize, 0), cache.occupied());
+}
+
+test "positive minimum leaves NXDOMAIN and NODATA SOA lifetimes unchanged including CNAME chains" {
+    const query = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" ++
+        "\x04home\x04test\x00\x00\x01\x00\x01";
+    for ([_]u32{ 0, 300 }) |minimum| {
+        for ([_]u16{ 0, 3 }) |rcode| {
+            for ([_]bool{ false, true }) |cname| {
+                for ([_]u32{ 0, 15 }) |negative_ttl| {
+                    var packet: [512]u8 = undefined;
+                    var writer = std.Io.Writer.fixed(&packet);
+                    try writer.writeAll(query);
+                    std.mem.writeInt(u16, packet[2..4], 0x8180 | rcode, .big);
+                    std.mem.writeInt(u16, packet[6..8], @intFromBool(cname), .big);
+                    std.mem.writeInt(u16, packet[8..10], 1, .big);
+                    if (cname) try writer.writeAll("\xc0\x0c\x00\x05\x00\x01\x00\x00\x00\x3c\x00\x02\xc0\x0c");
+                    const soa_ttl_offset = writer.end + 6;
+                    try writer.writeAll("\xc0\x0c\x00\x06\x00\x01\x00\x00\x00\x3c\x00\x16" ++
+                        "\x00\x00" ++
+                        "\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x04");
+                    try writer.writeInt(u32, negative_ttl, .big);
+                    var cache = try Cache.init(std.testing.allocator, 1);
+                    defer cache.deinit();
+                    cache.min_positive_ttl_seconds = minimum;
+                    try cache.put(Key.fromQuery(query).?, writer.buffered(), 100);
+                    var out: [512]u8 = undefined;
+                    if (negative_ttl == 0) {
+                        try std.testing.expectEqual(@as(usize, 0), cache.occupied());
+                        continue;
+                    }
+                    const replay = cache.get(query, 114, &out).?;
+                    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, replay[soa_ttl_offset..][0..4], .big));
+                    if (cname) try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, replay[query.len + 6 ..][0..4], .big));
+                    try std.testing.expect(cache.get(query, 115, &out) == null);
+                }
+            }
+        }
+    }
 }

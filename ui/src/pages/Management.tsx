@@ -129,6 +129,7 @@ type SettingsDraft = {
   servers: { address: string; port: string }[];
   timeout: string;
   capacity: string;
+  minPositiveTtl: string;
   level: 'err' | 'warn' | 'info' | 'debug';
 };
 
@@ -144,6 +145,7 @@ function settingsDraft(snapshot: Snapshot<Schema<'Settings'>>): SettingsDraft {
     servers: settings.upstream.servers.map((server) => ({ address: server.address, port: String(server.port ?? 53) })),
     timeout: String(settings.upstream.timeout_ms ?? 3000),
     capacity: integerToken(snapshot.raw, 'capacity', settings.cache.capacity ?? 4096),
+    minPositiveTtl: String(settings.cache.min_positive_ttl_seconds ?? 0),
     level: settings.logging.level ?? 'info',
   };
 }
@@ -167,6 +169,7 @@ function settingsBody(draft: SettingsDraft) {
   });
   if (!integer(draft.timeout, 1, 4294967295)) throw new Error('Timeout must be an integer from 1 to 4294967295 milliseconds.');
   if (!integer(draft.capacity, 0)) throw new Error('Cache capacity must be a nonnegative integer, without fractions or exponent notation.');
+  if (!integer(draft.minPositiveTtl, 0, 4294967295)) throw new Error('Minimum positive cache retention must be an integer from 0 to 4294967295 seconds.');
   for (const [label, value] of [['TCP maximum connections', draft.maxConnections], ['TCP idle timeout', draft.idleTimeout], ['TCP read timeout', draft.readTimeout], ['TCP write timeout', draft.writeTimeout]]) {
     if (!integer(value, 1, 4294967295)) throw new Error(`${label} must be an integer from 1 to 4294967295.`);
   }
@@ -175,7 +178,7 @@ function settingsBody(draft: SettingsDraft) {
     tcp: { max_connections: Number(draft.maxConnections), idle_timeout_ms: Number(draft.idleTimeout), read_timeout_ms: Number(draft.readTimeout), write_timeout_ms: Number(draft.writeTimeout) },
   };
   const upstream = { servers: draft.servers.map((server) => ({ address: server.address, port: Number(server.port) })), timeout_ms: Number(draft.timeout) };
-  return new RawJson(`{"dns":${JSON.stringify(dns)},"upstream":${JSON.stringify(upstream)},"cache":{"capacity":${draft.capacity}},"logging":{"level":${JSON.stringify(draft.level)}}}`);
+  return new RawJson(`{"dns":${JSON.stringify(dns)},"upstream":${JSON.stringify(upstream)},"cache":{"capacity":${draft.capacity},"min_positive_ttl_seconds":${draft.minPositiveTtl}},"logging":{"level":${JSON.stringify(draft.level)}}}`);
 }
 
 export function SettingsPage() {
@@ -250,7 +253,12 @@ function SettingsEditor({ initial }: { initial: Snapshot<Schema<'Settings'>> }) 
           </Stack>
         </Fieldset>
         <SimpleGrid cols={{ base: 1, sm: 2 }}>
-          <Fieldset legend="Cache" disabled={locked}><TextInput label="Capacity (slots)" required inputMode="numeric" value={draft.capacity} onChange={(event) => update('capacity', event.currentTarget.value)} description="0 disables caching. Capacity changes replace the cache. The server enforces its platform integer limit." /></Fieldset>
+          <Fieldset legend="Cache" disabled={locked}>
+            <Stack gap="md">
+              <TextInput label="Capacity (slots)" required inputMode="numeric" value={draft.capacity} onChange={(event) => update('capacity', event.currentTarget.value)} description="0 disables caching. Capacity changes replace the cache. The server enforces its platform integer limit." />
+              <TextInput label="Minimum positive retention (seconds)" required inputMode="numeric" value={draft.minPositiveTtl} onChange={(event) => update('minPositiveTtl', event.currentTarget.value)} description="0–4294967295; default 0 respects upstream TTL. Longer internal reuse can serve stale destinations. Client TTLs still age to zero, never extended. Zero-TTL packets and negative replies are unchanged. Changing this value clears the cache." />
+            </Stack>
+          </Fieldset>
           <Fieldset legend="Logging" disabled={locked}><Select label="Log level" allowDeselect={false} data={[{ value: 'err', label: 'Error' }, { value: 'warn', label: 'Warning' }, { value: 'info', label: 'Info' }, { value: 'debug', label: 'Debug' }]} value={draft.level} onChange={(value) => { if (value) update('level', value as SettingsDraft['level']); }} /></Fieldset>
         </SimpleGrid>
         <Group><Button type="submit" loading={writer.busy} disabled={reading || needsReview || !dirty}>Save & activate settings</Button><Text size="sm" c="dimmed">All four sections are replaced together.</Text></Group>
