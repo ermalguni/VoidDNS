@@ -35,6 +35,7 @@ pub const Management = struct {
     pending: [control.request_capacity]control.Request = undefined,
     pending_count: usize = 0,
     quit_requested: bool = false,
+    telemetry: ?*@import("../telemetry/store.zig").Store = null,
 
     const Result = struct { saved: bool, active: bool, durability: enum { unchanged, durable, uncertain }, revision: u64, resource_id: ?[]const u8 = null };
     const Operation = struct { id: u64, status: enum { running, succeeded, failed }, result: ?Result = null, @"error": ?[]const u8 = null };
@@ -116,6 +117,11 @@ pub const Management = struct {
 
     fn dispatch(context: *anyopaque, allocator: std.mem.Allocator, request: bridge.Request) !bridge.Response {
         const self: *Management = @ptrCast(@alignCast(context));
+        const metrics = @import("../telemetry/api.zig");
+        if (metrics.owns(request.path) and eq(request.method, "GET")) {
+            if (self.telemetry) |store| return metrics.handle(store, allocator, request);
+            return failure(allocator, 503, "TelemetryUnavailable", null);
+        }
         var call: bridge.Call = .{ .allocator = allocator, .request = request };
         self.mailbox.putApi(self.io, &call) catch |err| return failure(allocator, 503, @errorName(err), null);
         return call.awaitResult(self.io) catch |err| failure(allocator, 503, @errorName(err), null);
@@ -137,7 +143,7 @@ pub const Management = struct {
     }
 
     pub fn handleCall(self: *Management, call: *bridge.Call) void {
-        const response = self.handle(call.allocator, call.request) catch |err| failure(call.allocator, switch (err) {
+        const response = self.handle(call.allocator, call.request) catch |err| failure(call.allocator, if (std.mem.startsWith(u8, @errorName(err), "SQLite")) @as(u16, 503) else switch (err) {
             error.OutOfMemory => 500,
             else => 400,
         }, @errorName(err), self.revision);
@@ -280,6 +286,20 @@ pub const Management = struct {
         const post = eq(request.method, "POST");
         const put = eq(request.method, "PUT");
         const delete = eq(request.method, "DELETE");
+        if (@import("../telemetry/api.zig").owns(request.path)) {
+            const store = self.telemetry orelse return failure(a, 503, "TelemetryUnavailable", self.revision);
+            if (!std.mem.startsWith(u8, path, "clients/") or !eq(request.method, "PATCH")) return failure(a, 405, "MethodNotAllowed", self.revision);
+            if (try self.precondition(a, request)) |response| return response;
+            const id = try @import("../telemetry/api.zig").positive(path[8..]);
+            const body = try parseBody(struct { name: ?[]const u8 }, a, request.body);
+            if (body.name) |name| {
+                if (name.len == 0 or name.len > 256 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidClientName;
+                for (name) |byte| if (byte < 32 or byte == 127) return error.InvalidClientName;
+            }
+            if (!try store.rename(id, body.name)) return failure(a, 404, "ClientNotFound", self.revision);
+            self.revision += 1;
+            return json(a, 200, .{ .id = id, .name = body.name }, self.revision);
+        }
         if (eq(path, "config/validate")) {
             if (!post) return failure(a, 405, "MethodNotAllowed", self.revision);
             var diagnostic: config.Diagnostic = .{};

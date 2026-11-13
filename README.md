@@ -279,7 +279,7 @@ no HTTP listener starts. UI-only operation is invalid.
 
 DNS accepts UDP and TCP. Signal-based graceful shutdown is not
 implemented; for cooperative shutdown, start with `-i` and append
-`--config /config/voiddns.json --control-stdin`, then send `quit` through stdin.
+`--config /config/voiddns.json --control-stdin`, then send `quit` through stdin. Include --database /data/voiddns.sqlite3 when replacing the container command.
 
 To build a native amd64 image locally using Zig 0.17.1 (prefetch dependencies
 as described above):
@@ -912,8 +912,8 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 Status readiness means the DNS listener is running, not that upstream resolvers
 are healthy. Policy checks accept `A`, `AAAA`, or a numeric DNS type and assume
 class IN. They report the normalized name, decision, reason, and matching
-explicit/imported/local conditions. There are no imported allowlists, query
-statistics/history, diagnostic-resolution endpoints, or peer endpoints.
+explicit/imported/local conditions. There are no imported allowlists,
+diagnostic-resolution endpoints, or peer endpoints.
 
 Domain request bodies contain `{"domain":"example.test","action":"block"}` or
 `"allow"`. Their deterministic IDs are `block:example.test` and
@@ -1020,3 +1020,110 @@ curl --fail-with-body -H "X-API-Key: $KEY" "$API/operations/$OP"
 Repeat the last GET until it completes; obtain a fresh revision before the next
 mutation. Use protected curl configuration/header files where exposing a key in
 process arguments is unacceptable.
+
+## Client history and metrics
+
+VoidDNS uses [vrischmann/zig-sqlite](https://github.com/vrischmann/zig-sqlite),
+pinned to revision 1eba1e490629897e71dc3a23aad6fe9a319e0c82, with bundled SQLite.
+Supply the database path on the command line:
+
+    zig build run -- --config examples/voiddns.json --database ./data/voiddns.sqlite3
+
+Without --database, the path is $HOME/.config/voiddns/voiddns.sqlite3.
+HOME must be absolute; there is no fallback to the working directory.
+Relative explicit database paths resolve against the working directory.
+Parent directories are created; new database files use mode 0600 on POSIX.
+The directory must be writable for WAL sidecar files. Use local storage.
+Database startup failure is fatal; unknown future schema versions are rejected.
+
+The clients table contains a unique canonical observed IPv4 address, nullable
+manually assigned name, and first/last seen times. The requests table contains
+individual events. Addresses exclude ports; a shared DNS proxy appears as one
+client. DHCP address reuse does not establish device identity. Client metadata
+survives independently of history and is not peer-synchronized. Configuration,
+rules, and local records still persist in the operator JSON file. DNS responses,
+filtering indexes, and imported contents remain RAM-only.
+
+Requests retain a rolling seven days based on receive time. Reads exclude
+expired rows immediately. Cleanup runs at startup and every five minutes in
+1000-row batches, continuing until the backlog clears. Clients and names remain.
+SQLite reuses freed pages; the database file need not shrink. This is an age
+limit, not a byte or row-count limit.
+
+UDP datagrams and complete TCP DNS frames produce owned fixed-size events.
+Incomplete TCP frames and ignored UDP response packets are not history entries.
+Invalid queries may have unavailable name/type fields. Outcomes are blocked,
+cached, forwarded, local, or rejected. Forwarded means an upstream exchange was
+attempted, including timeouts. Upstream UDP-to-TCP fallback counts once; a client
+retry counts separately. Processing/delivery errors overlap outcomes. NXDOMAIN
+is not automatically an error. Duration covers processing through response
+submission/write using a monotonic clock. Receive timestamps use Unix milliseconds.
+
+DNS submits to a preallocated 4096-event queue without allocation, database I/O,
+or waiting for queue locks. A writer drains batches of up to 256, polling every
+250 ms when idle. Queue overflow/contention and failed transactions drop events
+and increment a process-local loss counter. DNS remains available during runtime
+database failures. Graceful shutdown joins producers and HTTP handlers before
+draining; a crash can lose queued events.
+
+All endpoints below require the existing X-API-Key:
+
+| Endpoint | Response |
+|---|---|
+| GET /api/v1/metrics/summary | Totals, outcome counts, active clients, errors, blocked/cache-hit percentages, average duration |
+| GET /api/v1/metrics/timeseries | Sparse time buckets; absent buckets have zero recorded events |
+| GET /api/v1/metrics/domains | Domains ranked by matching request count |
+| GET /api/v1/metrics/clients | Active clients ranked by matching request count |
+| GET /api/v1/metrics/health | Writer health, pending events, dropped events since startup, last persistence, retention |
+| GET /api/v1/clients | Clients by ascending ID with selected-period counts, including inactive clients |
+| GET /api/v1/clients/{id} | Client identity and metadata |
+| PATCH /api/v1/clients/{id} | Set a name or clear it with JSON null |
+| GET /api/v1/requests | Newest requests first, ordered by receive time then ID |
+
+Shared filters: from inclusive, to exclusive, client_id, resolution, exact domain,
+numeric query_type, transport, and errors=true. Times accept Unix milliseconds
+or UTC YYYY-MM-DDTHH:MM:SSZ. Default: last 24 hours. Maximum history: seven days,
+excluding future times. A small retention-edge transport allowance is clamped to
+the current cutoff. Limit is 1–100 (default 50). Interval accepts 1m, 5m, 15m, 1h;
+defaults are 15m up to 24 hours, otherwise 1h. Maximum 1000 chart buckets.
+
+Metric envelopes contain from_ms, to_ms, observed_at_ms, interval_ms, data, and
+nullable next. Summary data is an object; other collection data is an array.
+Request/client pagination uses opaque after cursors; preserve all filters.
+Request cursors freeze time bounds and an insertion watermark. Retention may
+remove old rows; restart the first page if a cursor expires. Client names reflect
+current metadata, not historical name snapshots.
+
+Client renames use synchronous SQLite writes serialized through main, requiring
+quoted global If-Match from GET /status and returning a new ETag. Missing/stale
+revisions return 428/412; a pending configuration writer returns 409. Incoming
+telemetry does not advance the configuration revision. Metrics reads use a
+separate serialized connection outside DNS locks and a two-second SQL execution
+deadline. See the embedded OpenAPI contract for response schemas.
+
+The Overview page provides a stacked volume chart, totals, active clients, and
+blocked domains. Clients supports details and inline naming. Request history
+provides filters, expandable details, and pagination. Select a chart bar to inspect
+that interval. Metrics refresh every ten seconds while visible; history stays
+still until refreshed. Chart data is also available as a table.
+
+Blocked percentage = blocked / total. Cache hit percentage =
+cached / (cached + forwarded). Empty denominators display zero. Active clients
+means distinct clients with matching retained requests. Errors overlap outcomes,
+so they are not another stacked category. Counts describe retained recorded
+events; loss is surfaced in the UI. There are no lifetime totals.
+
+After building the UI and Zig executable, validate localhost integration with:
+
+    zig build test-integration
+
+Or run python3 tests/telemetry_integration.py against zig-out/bin/VoidDNS.
+
+The integration test uses temporary files and checks UDP/TCP attribution,
+classification, authentication, revision conflicts, pagination, restart
+persistence, retention, and private file creation.
+
+Packaged systemd services use /var/lib/voiddns/voiddns.sqlite3 via StateDirectory.
+The container default is /data/voiddns.sqlite3; Compose mounts the persistent
+voiddns-data volume there. Mount writable storage at /data when running the
+container directly, especially with a read-only root filesystem.

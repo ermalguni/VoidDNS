@@ -30,7 +30,8 @@ EOF
     chmod 644 "$config/voiddns.json"
     container=$(docker run -d --platform "$platform" --cap-drop ALL --read-only --tmpfs /tmp \
         -p 127.0.0.1::8080 -p 127.0.0.1::5353/udp \
-        --mount "type=bind,src=$config,dst=/config,readonly" "$image")
+        --mount "type=bind,src=$config,dst=/config,readonly" "$image" \
+        --config /config/voiddns.json --database /tmp/voiddns.sqlite3)
     if [[ "$mode" == invalid ]]; then
         code=$(docker wait "$container")
         [[ "$code" != 0 ]]

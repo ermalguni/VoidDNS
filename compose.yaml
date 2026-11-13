@@ -13,9 +13,13 @@ services:
       - "53:5353/tcp"
       - "127.0.0.1:8081:8080"
     volumes:
+      - voiddns-data:/data
       - type: bind
         source: ./examples
         target: /config
         bind:
           create_host_path: false
-    command: ["--config", "/config/voiddns.json"]
+    command: ["--config", "/config/voiddns.json", "--database", "/data/voiddns.sqlite3"]
+
+volumes:
+  voiddns-data:

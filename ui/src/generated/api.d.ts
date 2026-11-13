@@ -339,6 +339,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/metrics/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recorded request totals and rates */
+        get: operations["get_metrics_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/timeseries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sparse time buckets; omitted buckets have zero recorded events */
+        get: operations["get_metrics_timeseries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Domains ranked by matching request count */
+        get: operations["get_metrics_domains"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Active clients ranked by matching request count */
+        get: operations["get_metrics_clients"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Clients ordered by ID, with counts over the selected period */
+        get: operations["get_clients"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Request history newest first, with snapshot-qualified cursor pagination */
+        get: operations["get_requests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Process-local telemetry loss and persistence health */
+        get: operations["get_telemetry_health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/clients/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** Client identity, retained independently of request history */
+        get: operations["get_client"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Set or clear a client name synchronously in SQLite */
+        patch: operations["rename_client"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -542,6 +681,214 @@ export interface components {
             format: "domains" | "hosts";
             /** @description Persistent provenance marker enforced by the server. New/content-changed sources become managed; a client cannot clear the marker on an existing managed source. */
             api_managed?: boolean;
+        };
+        MetricCounts: {
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            forwarded: number;
+            /** Format: int64 */
+            local: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            errors: number;
+        };
+        MetricsSummary: {
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            forwarded: number;
+            /** Format: int64 */
+            local: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            errors: number;
+            /** Format: int64 */
+            active_clients: number;
+            blocked_percentage: number;
+            cache_hit_percentage: number;
+            average_duration_us: number;
+        };
+        MetricBucket: {
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            forwarded: number;
+            /** Format: int64 */
+            local: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            errors: number;
+            /** Format: int64 */
+            start_ms: number;
+        };
+        MetricDomain: {
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            forwarded: number;
+            /** Format: int64 */
+            local: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            errors: number;
+            domain: string;
+        };
+        Client: {
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            forwarded: number;
+            /** Format: int64 */
+            local: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            errors: number;
+            /** Format: int64 */
+            id: number;
+            /** Format: ipv4 */
+            ip_address: string;
+            name: string | null;
+            /** Format: int64 */
+            first_seen_at_ms: number;
+            /** Format: int64 */
+            last_seen_at_ms: number;
+        };
+        ClientIdentity: {
+            /** Format: int64 */
+            id: number;
+            /** Format: ipv4 */
+            ip_address: string;
+            name: string | null;
+            /** Format: int64 */
+            first_seen_at_ms: number;
+            /** Format: int64 */
+            last_seen_at_ms: number;
+        };
+        RequestHistoryEntry: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            client_id: number;
+            ip_address: string;
+            client_name: string | null;
+            /** Format: int64 */
+            received_at_ms: number;
+            domain: string | null;
+            query_type: number | null;
+            query_class: number | null;
+            /** @enum {string} */
+            transport: "udp" | "tcp";
+            /** @enum {string} */
+            resolution: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+            rcode: number | null;
+            /** Format: int64 */
+            duration_us: number;
+            error: string | null;
+        };
+        TelemetryHealth: {
+            writer_healthy: boolean;
+            /** Format: int64 */
+            pending_events: number;
+            /** Format: int64 */
+            dropped_events_since_start: number;
+            /** Format: int64 */
+            last_persisted_at_ms: number;
+            /** @constant */
+            retention_days: 7;
+        };
+        ClientName: {
+            name: string | null;
+        };
+        ClientRenamed: {
+            /** Format: int64 */
+            id: number;
+            name: string | null;
+        };
+        MetricsSummaryResponse: {
+            /** Format: int64 */
+            from_ms: number;
+            /** Format: int64 */
+            to_ms: number;
+            /** Format: int64 */
+            observed_at_ms: number;
+            /** Format: int64 */
+            interval_ms: number;
+            data: components["schemas"]["MetricsSummary"];
+            next: string | null;
+        };
+        TimeseriesResponse: {
+            /** Format: int64 */
+            from_ms: number;
+            /** Format: int64 */
+            to_ms: number;
+            /** Format: int64 */
+            observed_at_ms: number;
+            /** Format: int64 */
+            interval_ms: number;
+            data: components["schemas"]["MetricBucket"][];
+            next: string | null;
+        };
+        DomainMetricsResponse: {
+            /** Format: int64 */
+            from_ms: number;
+            /** Format: int64 */
+            to_ms: number;
+            /** Format: int64 */
+            observed_at_ms: number;
+            /** Format: int64 */
+            interval_ms: number;
+            data: components["schemas"]["MetricDomain"][];
+            next: string | null;
+        };
+        ClientMetricsResponse: {
+            /** Format: int64 */
+            from_ms: number;
+            /** Format: int64 */
+            to_ms: number;
+            /** Format: int64 */
+            observed_at_ms: number;
+            /** Format: int64 */
+            interval_ms: number;
+            data: components["schemas"]["Client"][];
+            next: string | null;
+        };
+        RequestHistoryResponse: {
+            /** Format: int64 */
+            from_ms: number;
+            /** Format: int64 */
+            to_ms: number;
+            /** Format: int64 */
+            observed_at_ms: number;
+            /** Format: int64 */
+            interval_ms: number;
+            data: components["schemas"]["RequestHistoryEntry"][];
+            next: string | null;
         };
     };
     responses: never;
@@ -3120,6 +3467,787 @@ export interface operations {
                 };
             };
             /** @description Management queue full or server shutting down */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_metrics_summary: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetricsSummaryResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_metrics_timeseries: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeseriesResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_metrics_domains: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainMetricsResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_metrics_clients: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientMetricsResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_clients: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientMetricsResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Cursor time range has completely expired from retention */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_requests: {
+        parameters: {
+            query?: {
+                /** @description Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago. */
+                from?: string;
+                /** @description Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days. */
+                to?: string;
+                /** @description Filter by observed client. */
+                client_id?: number;
+                /** @description Resolution path; errors overlap these categories. */
+                resolution?: "blocked" | "cached" | "forwarded" | "local" | "rejected";
+                /** @description Exact normalized ASCII domain. */
+                domain?: string;
+                /** @description Numeric DNS query type. */
+                query_type?: number;
+                /** @description Client transport. */
+                transport?: "udp" | "tcp";
+                /** @description Return only processing errors when true. */
+                errors?: boolean;
+                /** @description Maximum rows for collection and ranking endpoints. */
+                limit?: number;
+                /** @description Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets. */
+                interval?: "1m" | "5m" | "15m" | "1h";
+                /** @description Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestHistoryResponse"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Cursor time range has completely expired from retention */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_telemetry_health: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TelemetryHealth"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_client: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientIdentity"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    rename_client: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Quoted global revision from GET /status. Request telemetry does not advance this revision. */
+                "If-Match": string;
+            };
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientName"];
+            };
+        };
+        responses: {
+            /** @description Successful response */
+            200: {
+                headers: {
+                    /** @description Updated quoted global revision */
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientRenamed"];
+                };
+            };
+            /** @description Invalid filters, time range, or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Client or endpoint not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unsupported method */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Configuration writer busy */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Stale global revision */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description If-Match required */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Telemetry database unavailable or query deadline exceeded */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -7,6 +7,7 @@ const State = @import("state/state.zig").State;
 const Worker = @import("server/server.zig").Worker;
 const control = @import("server/control.zig");
 const logging = @import("logging.zig");
+const Telemetry = @import("telemetry/store.zig").Store;
 
 // Keep all levels compiled in; configuration publication selects the threshold.
 pub const std_options: std.Options = .{
@@ -14,16 +15,19 @@ pub const std_options: std.Options = .{
     .logFn = logging.logFn,
 };
 
-const usage = "Usage: VoidDNS --config <path> [--control-stdin]\n" ++
+const usage = "Usage: VoidDNS --config <path> [--database <path>] [--control-stdin]\n" ++
+    "  --database: SQLite client history (default: $HOME/.config/voiddns/voiddns.sqlite3)\n" ++
     "  --control-stdin: reload, refresh <source-id>, refresh-all, save <candidate-file>, quit; EOF quits\n";
 
 const Arguments = struct {
     path: []const u8,
     control_stdin: bool,
+    database: ?[]const u8 = null,
 
     fn parse(args: []const []const u8) !Arguments {
         var path: ?[]const u8 = null;
         var control_stdin = false;
+        var database: ?[]const u8 = null;
         var index: usize = 1;
         while (index < args.len) : (index += 1) {
             if (std.mem.eql(u8, args[index], "--config")) {
@@ -31,12 +35,16 @@ const Arguments = struct {
                     return error.InvalidArguments;
                 index += 1;
                 path = args[index];
+            } else if (std.mem.eql(u8, args[index], "--database")) {
+                if (database != null or index + 1 >= args.len or args[index + 1].len == 0) return error.InvalidArguments;
+                index += 1;
+                database = args[index];
             } else if (std.mem.eql(u8, args[index], "--control-stdin")) {
                 if (control_stdin) return error.InvalidArguments;
                 control_stdin = true;
             } else return error.InvalidArguments;
         }
-        return .{ .path = path orelse return error.InvalidArguments, .control_stdin = control_stdin };
+        return .{ .path = path orelse return error.InvalidArguments, .control_stdin = control_stdin, .database = database };
     }
 };
 
@@ -91,6 +99,23 @@ pub fn main(init: std.process.Init) !void {
     defer threaded.deinit();
     const io = threaded.io();
 
+    const database_path = try databasePath(allocator, options.database, init.environ_map.get("HOME"));
+    defer allocator.free(database_path);
+    if (std.fs.path.dirname(database_path)) |parent| {
+        _ = try std.Io.Dir.cwd().createDirPathStatus(io, parent, if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o700) else .default_dir);
+    }
+    const new_database = std.Io.Dir.cwd().createFile(io, database_path, .{
+        .exclusive = true,
+        .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists => null,
+        else => return err,
+    };
+    if (new_database) |file| file.close(io);
+    const telemetry = try Telemetry.init(allocator, io, database_path);
+    defer telemetry.deinit();
+    try telemetry.start();
+
     var manager = try Manager.init(allocator, options.path);
     defer manager.deinit();
     var mailbox: control.Mailbox = .{};
@@ -105,6 +130,7 @@ pub fn main(init: std.process.Init) !void {
     defer active.destroy(allocator, io);
     var next_generation: u64 = 1;
     logging.setLevel(active.settings.log_level);
+    active.worker.telemetry = telemetry;
     try start(active, io, &next_generation);
 
     var management: Management = .{
@@ -116,6 +142,7 @@ pub fn main(init: std.process.Init) !void {
         .worker = &active.worker,
         .mailbox = &mailbox,
         .next_generation = &next_generation,
+        .telemetry = telemetry,
     };
     var bridge = management.asBridge();
     var api: ?ApiServer = null;
@@ -182,6 +209,35 @@ fn start(generation: *Application, io: std.Io, next_generation: *u64) !void {
     try generation.worker.start(io, id);
 }
 
+fn databasePath(allocator: std.mem.Allocator, override: ?[]const u8, home: ?[]const u8) ![:0]u8 {
+    if (override) |path| {
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null or eqPath(path, ":memory:")) return error.InvalidDatabasePath;
+        return allocator.dupeSentinel(u8, path, 0);
+    }
+    const directory = home orelse return error.HomeDirectoryUnavailable;
+    if (!std.fs.path.isAbsolute(directory)) return error.InvalidHomeDirectory;
+    return std.fmt.allocPrintSentinel(allocator, "{s}/.config/voiddns/voiddns.sqlite3", .{directory}, 0);
+}
+
+fn eqPath(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+test "database argument and home default are independent of config location" {
+    const a = std.testing.allocator;
+    const options = try Arguments.parse(&.{ "VoidDNS", "--config", "config.json", "--database", "history.sqlite3" });
+    const custom = try databasePath(a, options.database, null);
+    defer a.free(custom);
+    try std.testing.expectEqualStrings("history.sqlite3", custom);
+    const default = try databasePath(a, null, "/home/operator");
+    defer a.free(default);
+    try std.testing.expectEqualStrings("/home/operator/.config/voiddns/voiddns.sqlite3", default);
+    try std.testing.expectError(error.HomeDirectoryUnavailable, databasePath(a, null, null));
+    try std.testing.expectError(error.InvalidHomeDirectory, databasePath(a, null, "relative"));
+    try std.testing.expectError(error.InvalidArguments, Arguments.parse(&.{ "VoidDNS", "--config", "config.json", "--database" }));
+    try std.testing.expectError(error.InvalidArguments, Arguments.parse(&.{ "VoidDNS", "--config", "config.json", "--database", "a", "--database", "b" }));
+}
+
 test "stdin control is explicit and config argument remains required" {
     const plain = try Arguments.parse(&.{ "VoidDNS", "--config", "example.json" });
     try std.testing.expect(!plain.control_stdin);
@@ -199,4 +255,5 @@ test {
     _ = @import("config/manager.zig");
     _ = @import("server/control.zig");
     _ = @import("logging.zig");
+    _ = @import("telemetry/api.zig");
 }

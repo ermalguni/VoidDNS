@@ -28,6 +28,7 @@ pub const Worker = struct {
     tcp_mutex: std.Io.Mutex = .init,
     tcp_settings: Config.Tcp,
     tcp_active: u32 = 0,
+    telemetry: ?*@import("../telemetry/store.zig").Store = null,
 
     /// Prepared without the runtime lock. commit cannot fail and leaves the
     /// retired cache here for deinit after publication releases the lock.
@@ -130,7 +131,7 @@ pub const Worker = struct {
     }
 
     fn run(self: *Worker, io: std.Io) anyerror!void {
-        udp.serve(io, &self.listener.?, self.buffer, &self.cache, &self.upstreams, self.state, &self.mutex) catch |err| {
+        udp.serve(io, &self.listener.?, self.buffer, &self.cache, &self.upstreams, self.state, &self.mutex, self.telemetry) catch |err| {
             if (err != error.Canceled) {
                 self.mailbox.workerFailed(io, .{ .generation = self.generation, .err = err });
             }

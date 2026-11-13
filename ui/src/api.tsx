@@ -23,6 +23,12 @@ export async function requestApi<T>(path: string, apiKey = '', method = 'GET', b
     throw new ApiError(0, 'ApiNotFound', apiNotFoundMessage);
   }
   if (response.status === 401) throw new ApiError(401, 'Unauthorized', 'Invalid API key. Enter a valid administrator API key and try again.');
+  if (response.status === 503 && /^\/(metrics\/|clients(?:\/|\?|$)|requests(?:\?|$))/.test(path)) {
+    try {
+      const failure = JSON.parse(raw);
+      if (typeof failure?.error?.code === 'string') throw new ApiError(503, failure.error.code, 'Request history is temporarily unavailable. DNS continues serving; retry this view shortly.');
+    } catch (cause) { if (cause instanceof ApiError) throw cause; }
+  }
   if ([502, 503, 504].includes(response.status)) throw new ApiError(response.status, 'ApiNotFound', apiNotFoundMessage);
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw new ApiError(response.status, 'ApiNotFound', apiNotFoundMessage); }

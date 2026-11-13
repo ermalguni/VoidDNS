@@ -62,15 +62,32 @@ fn handle(worker: *Worker, io: std.Io, stream: std.Io.net.Stream, settings: Conf
         const size = std.mem.readInt(u16, &prefix, .big);
         if (size < message.Header.len) return error.InvalidFrame;
         try readExact(io, stream, buffer[0..size], read_deadline);
-        if (decode.flags(buffer[0..size]) & message.Flags.response != 0) return error.InvalidQuestion;
+        var event = @import("../telemetry/event.zig").Event.begin(io, stream.socket.address.ip4.bytes, buffer[0..size], .tcp);
+        var response_packet: ?[]const u8 = null;
+        var failure: ?anyerror = null;
+        defer if (worker.telemetry) |store| {
+            event.finish(io, response_packet, failure);
+            store.submit(event);
+        };
+        if (decode.flags(buffer[0..size]) & message.Flags.response != 0) {
+            failure = error.InvalidQuestion;
+            return error.InvalidQuestion;
+        }
         const response = resolved: {
             try worker.mutex.lock(io);
             defer worker.mutex.unlock(io);
-            break :resolved try resolver.resolve(io, buffer[0..size], buffer, &worker.cache, &worker.upstreams, worker.state, .tcp);
+            break :resolved resolver.resolveTracked(io, buffer[0..size], buffer, &worker.cache, &worker.upstreams, worker.state, .tcp, &event.resolution) catch |err| {
+                failure = err;
+                return err;
+            };
         };
+        response_packet = response;
         std.mem.writeInt(u16, &prefix, @intCast(response.len), .big);
         const write_deadline = deadline(io, settings.write_timeout_ms);
-        try writeAll(io, stream, &prefix, response, write_deadline);
+        writeAll(io, stream, &prefix, response, write_deadline) catch |err| {
+            failure = err;
+            return err;
+        };
     }
 }
 

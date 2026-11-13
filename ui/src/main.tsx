@@ -7,11 +7,12 @@ import { ApiError, ApiProvider, apiNotFoundMessage, requestApi } from './api';
 import { OperationFeedback } from './components';
 import { DomainsPage, RecordsPage, BlocklistsPage } from './pages/Collections';
 import { OverviewPage, SettingsPage, ConfigurationPage, PolicyPage } from './pages/Management';
+import { ClientsPage, RequestsPage } from './pages/Metrics';
 import '@mantine/core/styles.css';
 import './styles.css';
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 5000, refetchOnWindowFocus: false }, mutations: { retry: false } } });
 const theme = createTheme({ primaryColor: 'teal', defaultRadius: 'sm', fontFamily: '"Trebuchet MS", "Verdana", sans-serif', headings: {fontFamily: '"Trebuchet MS", "Verdana", sans-serif'} });
-const links = [['/', 'Overview'], ['/domains', 'Domains'], ['/records', 'Local records'], ['/blocklists', 'Blocklists'], ['/policy', 'Policy check'], ['/settings', 'Settings'], ['/configuration', 'Configuration']];
+const links = [['/', 'Overview'], ['/clients', 'Clients'], ['/requests', 'Request history'], ['/domains', 'Domains'], ['/records', 'Local records'], ['/blocklists', 'Blocklists'], ['/policy', 'Policy check'], ['/settings', 'Settings'], ['/configuration', 'Configuration']];
 function Session() {
   const [key, setKey] = useState('');
   const [draft, setDraft] = useState('');
@@ -75,6 +76,8 @@ const router = createBrowserRouter([{element: <Session/>, children: [
   {path: 'settings', element: <SettingsPage/>},
   {path: 'configuration', element: <ConfigurationPage/>},
   {path: 'policy', element: <PolicyPage/>},
+  {path: 'clients', element: <ClientsPage/>},
+  {path: 'requests', element: <RequestsPage/>},
   {path: '*', element: <Stack><Title order={1}>Page not found</Title><Link to="/">Return to overview</Link></Stack>},
 ]}]);
 createRoot(document.getElementById('root')!).render(<MantineProvider theme={theme} defaultColorScheme="auto"><QueryClientProvider client={queryClient}><RouterProvider router={router}/></QueryClientProvider></MantineProvider>);

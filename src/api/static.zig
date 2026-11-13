@@ -15,6 +15,8 @@ fn isFrontendRoute(path: []const u8) bool {
         .{ "/policy", {} },
         .{ "/settings", {} },
         .{ "/configuration", {} },
+        .{ "/clients", {} },
+        .{ "/requests", {} },
     });
     return routes.has(path);
 }
@@ -56,7 +58,7 @@ pub fn serve(enabled: bool, req: *httpz.Request, res: *httpz.Response) Result {
 }
 
 test "only declared SPA routes resolve to the production index" {
-    for ([_][]const u8{ "/", "/domains", "/records", "/blocklists", "/policy", "/settings", "/configuration" }) |path| {
+    for ([_][]const u8{ "/", "/domains", "/records", "/blocklists", "/policy", "/settings", "/configuration", "/clients", "/requests" }) |path| {
         var request = httpz.testing.init(.{});
         defer request.deinit();
         request.url(path);

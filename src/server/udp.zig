@@ -17,12 +17,24 @@ pub fn serve(
     upstreams: *UpstreamPool,
     state: *State,
     runtime_mutex: *std.Io.Mutex,
+    telemetry: ?*@import("../telemetry/store.zig").Store,
 ) !void {
     while (true) {
         const query = try listener.receive(io, buffer);
+        if (query.data.len >= message.Header.len and decode.flags(query.data) & message.Flags.response != 0) continue;
 
-        if (query.data.len < message.Header.len) continue;
-        if (decode.flags(query.data) & message.Flags.response != 0) continue;
+        var event = @import("../telemetry/event.zig").Event.begin(io, query.from.ip4.bytes, query.data, .udp);
+        var response_packet: ?[]const u8 = null;
+        var failure: ?anyerror = null;
+        defer if (telemetry) |store| {
+            event.finish(io, response_packet, failure);
+            store.submit(event);
+        };
+
+        if (query.data.len < message.Header.len) {
+            failure = error.InvalidQuestion;
+            continue;
+        }
 
         logQuery(query.from, query.data);
         const query_id = decode.id(query.data);
@@ -30,7 +42,7 @@ pub fn serve(
         const response = resolved: {
             try runtime_mutex.lock(io);
             defer runtime_mutex.unlock(io);
-            break :resolved resolver.resolve(
+            break :resolved resolver.resolveTracked(
                 io,
                 query.data,
                 buffer,
@@ -38,7 +50,9 @@ pub fn serve(
                 upstreams,
                 state,
                 .udp,
+                &event.resolution,
             ) catch |err| {
+                failure = err;
                 if (err == error.Canceled) return err;
                 log.warn("resolution failed client={f} id={d}: {s}", .{
                     query.from, query_id, @errorName(err),
@@ -46,8 +60,10 @@ pub fn serve(
                 continue;
             };
         };
+        response_packet = response;
 
         listener.send(io, &query.from, response) catch |err| {
+            failure = err;
             if (err == error.Canceled) return err;
             log.warn("reply failed client={f} id={d}: {s}", .{
                 query.from, query_id, @errorName(err),
@@ -75,8 +91,8 @@ fn logQuery(client: std.Io.net.IpAddress, packet: []const u8) void {
         question.id,
         LoggedName{ .name = &question.name },
         type_name,
-        @intFromEnum(question.qtype),
-        @intFromEnum(question.qclass),
+        @backingInt(question.qtype),
+        @backingInt(question.qclass),
     });
 }
 

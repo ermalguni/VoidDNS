@@ -3,7 +3,7 @@
   "info": {
     "title": "VoidDNS management API",
     "version": "1.0.0",
-    "description": "Configuration-backed single-server management with an embedded public UI and authenticated API on one HTTP listener. DNS caches and imported contents remain RAM-only. No query telemetry or peer synchronization. All API endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API and UI settings, including the shared HTTP listener, require restart; live changes are rejected before saving or publication. Mutations require quoted If-Match and persistent mutations complete asynchronously."
+    "description": "Configuration-backed single-server management with an embedded public UI and authenticated API on one HTTP listener. DNS caches and imported contents remain RAM-only. SQLite stores seven days of client request telemetry. No peer synchronization. All API endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API and UI settings, including the shared HTTP listener, require restart; live changes are rejected before saving or publication. Mutations require quoted If-Match and persistent mutations complete asynchronously. Client names persist synchronously in SQLite; incoming telemetry does not advance the global revision."
   },
   "servers": [
     {
@@ -3245,6 +3245,1390 @@
           }
         }
       }
+    },
+    "/metrics/summary": {
+      "get": {
+        "operationId": "get_metrics_summary",
+        "summary": "Recorded request totals and rates",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/timeseries": {
+      "get": {
+        "operationId": "get_metrics_timeseries",
+        "summary": "Sparse time buckets; omitted buckets have zero recorded events",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimeseriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/domains": {
+      "get": {
+        "operationId": "get_metrics_domains",
+        "summary": "Domains ranked by matching request count",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainMetricsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/clients": {
+      "get": {
+        "operationId": "get_metrics_clients",
+        "summary": "Active clients ranked by matching request count",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientMetricsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clients": {
+      "get": {
+        "operationId": "get_clients",
+        "summary": "Clients ordered by ID, with counts over the selected period",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientMetricsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cursor time range has completely expired from retention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/requests": {
+      "get": {
+        "operationId": "get_requests",
+        "summary": "Request history newest first, with snapshot-qualified cursor pagination",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "description": "Inclusive UTC timestamp YYYY-MM-DDTHH:MM:SSZ or Unix milliseconds; defaults to 24 hours ago.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "description": "Exclusive UTC timestamp or Unix milliseconds; defaults to now. Maximum range seven days.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "description": "Filter by observed client.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "description": "Resolution path; errors overlap these categories.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blocked",
+                "cached",
+                "forwarded",
+                "local",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "description": "Exact normalized ASCII domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query_type",
+            "description": "Numeric DNS query type.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "description": "Client transport.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "udp",
+                "tcp"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "errors",
+            "description": "Return only processing errors when true.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum rows for collection and ranking endpoints.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "description": "Chart bucket duration. Defaults to 15m, or 1h for ranges over 24 hours. Maximum 1000 buckets.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "15m",
+                "1h"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Opaque cursor from the preceding page. Preserve filters; expired or changed filters require a fresh first page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestHistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cursor time range has completely expired from retention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/health": {
+      "get": {
+        "operationId": "get_telemetry_health",
+        "summary": "Process-local telemetry loss and persistence health",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryHealth"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clients/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "get": {
+        "operationId": "get_client",
+        "summary": "Client identity, retained independently of request history",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientIdentity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "rename_client",
+        "summary": "Set or clear a client name synchronously in SQLite",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "description": "Quoted global revision from GET /status. Request telemetry does not advance this revision.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClientName"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientRenamed"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Updated quoted global revision"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Client or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telemetry database unavailable or query deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Configuration writer busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Stale global revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "If-Match required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3651,9 +5035,13 @@
               "properties": {
                 "api": {
                   "properties": {
-                    "enabled": { "const": false }
+                    "enabled": {
+                      "const": false
+                    }
                   },
-                  "required": ["enabled"]
+                  "required": [
+                    "enabled"
+                  ]
                 }
               }
             },
@@ -3661,9 +5049,13 @@
               "properties": {
                 "ui": {
                   "properties": {
-                    "enabled": { "const": false }
+                    "enabled": {
+                      "const": false
+                    }
                   },
-                  "required": ["enabled"]
+                  "required": [
+                    "enabled"
+                  ]
                 }
               }
             }
@@ -4030,6 +5422,678 @@
           "id",
           "source",
           "format"
+        ],
+        "additionalProperties": false
+      },
+      "MetricCounts": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "forwarded": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "local": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "total",
+          "blocked",
+          "cached",
+          "forwarded",
+          "local",
+          "rejected",
+          "errors"
+        ],
+        "additionalProperties": false
+      },
+      "MetricsSummary": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "forwarded": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "local": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "active_clients": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked_percentage": {
+            "type": "number"
+          },
+          "cache_hit_percentage": {
+            "type": "number"
+          },
+          "average_duration_us": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "total",
+          "blocked",
+          "cached",
+          "forwarded",
+          "local",
+          "rejected",
+          "errors",
+          "active_clients",
+          "blocked_percentage",
+          "cache_hit_percentage",
+          "average_duration_us"
+        ],
+        "additionalProperties": false
+      },
+      "MetricBucket": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "forwarded": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "local": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "start_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "total",
+          "blocked",
+          "cached",
+          "forwarded",
+          "local",
+          "rejected",
+          "errors",
+          "start_ms"
+        ],
+        "additionalProperties": false
+      },
+      "MetricDomain": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "forwarded": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "local": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "domain": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "total",
+          "blocked",
+          "cached",
+          "forwarded",
+          "local",
+          "rejected",
+          "errors",
+          "domain"
+        ],
+        "additionalProperties": false
+      },
+      "Client": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "forwarded": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "local": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ip_address": {
+            "type": "string",
+            "format": "ipv4"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_seen_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "total",
+          "blocked",
+          "cached",
+          "forwarded",
+          "local",
+          "rejected",
+          "errors",
+          "id",
+          "ip_address",
+          "name",
+          "first_seen_at_ms",
+          "last_seen_at_ms"
+        ],
+        "additionalProperties": false
+      },
+      "ClientIdentity": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ip_address": {
+            "type": "string",
+            "format": "ipv4"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_seen_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "ip_address",
+          "name",
+          "first_seen_at_ms",
+          "last_seen_at_ms"
+        ],
+        "additionalProperties": false
+      },
+      "RequestHistoryEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "client_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ip_address": {
+            "type": "string"
+          },
+          "client_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query_type": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query_class": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "udp",
+              "tcp"
+            ]
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "blocked",
+              "cached",
+              "forwarded",
+              "local",
+              "rejected"
+            ]
+          },
+          "rcode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "duration_us": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "client_id",
+          "ip_address",
+          "client_name",
+          "received_at_ms",
+          "domain",
+          "query_type",
+          "query_class",
+          "transport",
+          "resolution",
+          "rcode",
+          "duration_us",
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "TelemetryHealth": {
+        "type": "object",
+        "properties": {
+          "writer_healthy": {
+            "type": "boolean"
+          },
+          "pending_events": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dropped_events_since_start": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_persisted_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "retention_days": {
+            "type": "integer",
+            "const": 7
+          }
+        },
+        "required": [
+          "writer_healthy",
+          "pending_events",
+          "dropped_events_since_start",
+          "last_persisted_at_ms",
+          "retention_days"
+        ],
+        "additionalProperties": false
+      },
+      "ClientName": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "ClientRenamed": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "MetricsSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MetricsSummary"
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_ms",
+          "to_ms",
+          "observed_at_ms",
+          "interval_ms",
+          "data",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "TimeseriesResponse": {
+        "type": "object",
+        "properties": {
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricBucket"
+            }
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_ms",
+          "to_ms",
+          "observed_at_ms",
+          "interval_ms",
+          "data",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "DomainMetricsResponse": {
+        "type": "object",
+        "properties": {
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricDomain"
+            }
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_ms",
+          "to_ms",
+          "observed_at_ms",
+          "interval_ms",
+          "data",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "ClientMetricsResponse": {
+        "type": "object",
+        "properties": {
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Client"
+            }
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_ms",
+          "to_ms",
+          "observed_at_ms",
+          "interval_ms",
+          "data",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "RequestHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestHistoryEntry"
+            }
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_ms",
+          "to_ms",
+          "observed_at_ms",
+          "interval_ms",
+          "data",
+          "next"
         ],
         "additionalProperties": false
       }

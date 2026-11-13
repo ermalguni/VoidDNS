@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const sqlite = b.dependency("sqlite", .{ .target = target, .optimize = optimize }).module("sqlite");
     const httpz = b.dependency("httpz", .{
         .target = target,
         .optimize = optimize,
@@ -92,6 +93,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "VoidDNS", .module = mod },
                 .{ .name = "httpz", .module = httpz },
+                .{ .name = "sqlite", .module = sqlite },
             },
         }),
     });
@@ -157,6 +159,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const telemetry_integration = b.addSystemCommand(&.{"python3"});
+    telemetry_integration.addFileArg(b.path("tests/telemetry_integration.py"));
+    telemetry_integration.addArtifactArg(exe);
+    const integration_step = b.step("test-integration", "Test SQLite telemetry with localhost DNS and HTTP");
+    integration_step.dependOn(&telemetry_integration.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

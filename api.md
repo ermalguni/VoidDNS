@@ -457,8 +457,7 @@ exit 1
 
 ## Scope and contract maintenance
 
-Not implemented: imported allowlists, wildcard/suffix matching, query telemetry
-or history, diagnostic DNS resolution, peer synchronization endpoints, key
+Not implemented: imported allowlists, wildcard/suffix matching, diagnostic DNS resolution, peer synchronization endpoints, key
 management endpoints, or automatic source-refresh scheduling.
 DNS caches and imported contents remain RAM-only.
 
@@ -472,3 +471,38 @@ Known OpenAPI discrepancies in the current repository: `ApiSettings` advertises
 acceptance; generic path-ID descriptions say “source ID” even for domains,
 records, and operations. Follow the identities and actual defaults documented
 above rather than inferring runtime behavior from those schema annotations.
+
+## Client telemetry and metrics
+
+Client history is stored in a separate SQLite database, selected with
+--database or defaulting to $HOME/.config/voiddns/voiddns.sqlite3. Configuration
+continues to use the operator JSON file. Telemetry is asynchronous and may lose
+events on overload or storage failure; GET /metrics/health exposes process-local
+loss and writer health. History retains a rolling seven days; client names remain.
+
+Authenticated endpoints: GET /metrics/summary, /metrics/timeseries,
+/metrics/domains, /metrics/clients, /metrics/health, /clients, /clients/{id},
+and /requests. PATCH /clients/{id} accepts a required nullable name, requires
+quoted global If-Match from GET /status, completes synchronously, and returns
+the new ETag. Names are 1–256 UTF-8 bytes with no control characters; null clears.
+Telemetry inserts do not advance the configuration revision.
+
+Shared filters: from inclusive, to exclusive, client_id, resolution, exact domain,
+numeric query_type, transport, errors. Times accept Unix milliseconds or UTC
+YYYY-MM-DDTHH:MM:SSZ. Default last 24 hours, maximum seven days. Limit 1–100,
+default 50. Interval 1m/5m/15m/1h with at most 1000 buckets.
+
+Summary returns an object in data; list endpoints return arrays. Envelopes include
+from_ms, to_ms, observed_at_ms, interval_ms, data, and nullable next. Timeseries
+is sparse: missing buckets have zero recorded events. Clients sort by ID;
+requests sort by receive time then ID descending; rankings sort by matching count.
+Follow opaque after cursors without changing filters. Cursors freeze request
+insertion watermark/time bounds, but retention continues. Client names are current
+metadata. Health and individual identity responses are not enveloped.
+
+Outcomes are blocked, cached, forwarded, local, rejected. Errors overlap outcomes.
+Forwarded includes attempted upstream requests that fail. Cache hit percentage =
+cached / (cached + forwarded), blocked percentage = blocked / total, zero for
+empty denominators. Counts cover retained recorded events, never lifetime totals.
+SQL reads have a two-second execution deadline and run outside DNS/state locks.
+Consult the embedded OpenAPI contract for complete machine-readable schemas.

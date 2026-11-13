@@ -11,6 +11,7 @@ const domain = @import("../domains/domain.zig");
 const policy = @import("../policy/policy.zig");
 const message = @import("../dns/message.zig");
 const log = std.log.scoped(.resolver);
+const Resolution = @import("../telemetry/event.zig").Resolution;
 
 pub const Transport = enum { udp, tcp };
 
@@ -23,6 +24,10 @@ pub fn resolve(
     state: *State,
     transport: Transport,
 ) ![]const u8 {
+    return resolveTracked(io, query, buffer, cache, upstreams, state, transport, null);
+}
+
+pub fn resolveTracked(io: std.Io, query: []const u8, buffer: []u8, cache: *Cache, upstreams: *UpstreamPool, state: *State, transport: Transport, outcome: ?*Resolution) ![]const u8 {
     const normalized = try edns.stripCookies(query, buffer);
     const request = normalized.packet;
     if (normalized.cookies_removed != 0) {
@@ -37,12 +42,14 @@ pub fn resolve(
     {
         try state.mutex.lock(io);
         defer state.mutex.unlock(io);
-        if (try managedAnswer(&question, response_buffer, state)) |response|
+        if (try managedAnswerTracked(&question, response_buffer, state, outcome)) |response|
             return response;
     }
 
-    if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit|
+    if (cache.get(request, std.Io.Clock.awake.now(io).toSeconds(), buffer)) |hit| {
+        if (outcome) |value| value.* = .cached;
         return fitResponse(hit, &question, response_buffer);
+    }
 
     var saved: [CacheKey.max_query]u8 = undefined;
     const saved_key: ?[]const u8 = if (CacheKey.fromQuery(request)) |key| blk: {
@@ -50,6 +57,7 @@ pub fn resolve(
         break :blk saved[0..key.len];
     } else null;
 
+    if (outcome) |value| value.* = .forwarded;
     const received = try upstreams.forward(io, request, buffer);
     const sanitized = try edns.stripCookies(received, buffer);
     const response = sanitized.packet;
@@ -87,6 +95,10 @@ fn managedAnswer(
     buffer: []u8,
     state: *const State,
 ) !?[]const u8 {
+    return managedAnswerTracked(question, buffer, state, null);
+}
+
+fn managedAnswerTracked(question: *const message.Question, buffer: []u8, state: *const State, outcome: ?*Resolution) !?[]const u8 {
     var canonical_buffer: [253]u8 = undefined;
     const canonical = domain.fromWire(&question.name, &canonical_buffer) orelse return null;
 
@@ -100,7 +112,13 @@ fn managedAnswer(
         }
     }
 
-    return switch (policy.decide(state, canonical, local != null)) {
+    const decision = policy.decide(state, canonical, local != null);
+    if (outcome) |value| switch (decision) {
+        .block => value.* = .blocked,
+        .local => value.* = .local,
+        .forward => {},
+    };
+    return switch (decision) {
         .block => try blockedAnswer(question, buffer),
         .local => try encode.rrset(question, local.?, buffer),
         .forward => null,
@@ -315,7 +333,7 @@ test "local RRsets return every address in order with shared TTL and matching fa
     for (&records) |*record| {
         var buffer: [1232]u8 = undefined;
         @memcpy(buffer[0..test_query.len], test_query);
-        std.mem.writeInt(u16, buffer[test_query.len - 4 ..][0..2], @intFromEnum(record.recordType()), .big);
+        std.mem.writeInt(u16, buffer[test_query.len - 4 ..][0..2], @backingInt(record.recordType()), .big);
         const response = try resolve(std.testing.io, buffer[0..test_query.len], &buffer, &cache, &upstreams, &state, .udp);
         try std.testing.expectEqual(@as(u16, 0x1234), decode.id(response));
         try std.testing.expectEqual(@as(u16, 0x8190), decode.flags(response));
@@ -328,7 +346,7 @@ test "local RRsets return every address in order with shared TTL and matching fa
                 try std.testing.expectEqual(addresses.len, std.mem.readInt(u16, response[6..8], .big));
                 for (addresses) |*expected| {
                     try std.testing.expectEqual(@as(u16, 0xc00c), std.mem.readInt(u16, response[cursor..][0..2], .big));
-                    try std.testing.expectEqual(@intFromEnum(record.recordType()), std.mem.readInt(u16, response[cursor + 2 ..][0..2], .big));
+                    try std.testing.expectEqual(@backingInt(record.recordType()), std.mem.readInt(u16, response[cursor + 2 ..][0..2], .big));
                     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, response[cursor + 4 ..][0..2], .big));
                     try std.testing.expectEqual(record.ttl_seconds, std.mem.readInt(u32, response[cursor + 6 ..][0..4], .big));
                     try std.testing.expectEqual(expected.len, std.mem.readInt(u16, response[cursor + 10 ..][0..2], .big));
@@ -383,7 +401,7 @@ test "local RRsets truncate atomically at legacy EDNS and output buffer limits" 
         for (cases) |case| {
             var buffer: [1232]u8 = undefined;
             @memcpy(buffer[0..long_question.len], long_question);
-            std.mem.writeInt(u16, buffer[long_question.len - 4 ..][0..2], @intFromEnum(record.recordType()), .big);
+            std.mem.writeInt(u16, buffer[long_question.len - 4 ..][0..2], @backingInt(record.recordType()), .big);
             var query_len: usize = long_question.len;
             if (case.advertised) |size| {
                 buffer[11] = 1;

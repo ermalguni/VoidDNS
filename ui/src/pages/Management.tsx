@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useBeforeUnload, useBlocker } from 'react-router-dom';
 import { ApiError, RawJson, useApi, useWrite, type Schema } from '../api';
 import { ErrorNotice, PageHeading } from '../components';
+import { MetricsOverview } from './Metrics';
 
 type Snapshot<T> = { data: T; etag: string; raw: string };
 
@@ -80,6 +81,7 @@ export function OverviewPage() {
   }
   return <Stack gap="xl">
     <PageHeading title="Overview" description="The current listener, configuration agreement, and upstream response cache." />
+    <MetricsOverview />
     <Group justify="space-between"><Text size="sm" c="dimmed">Refreshes every 10 seconds while this page is open.</Text><Button variant="default" loading={status.isFetching || cache.isFetching} onClick={() => { void status.refetch(); void cache.refetch(); }}>Refresh status</Button></Group>
     <ErrorNotice error={status.error || cache.error || error} />
     {cleared && <Alert color="teal" title="Cache cleared">All upstream response-cache entries were cleared. Policies and local records were not changed.</Alert>}
