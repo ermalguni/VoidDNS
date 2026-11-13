@@ -28,7 +28,7 @@ pub const Index = struct {
     /// empties its map; failure leaves both names and published index unchanged.
     /// names must use this index's allocator.
     pub fn acquire(self: *Index, names: *parse.Names) !Snapshot {
-        const snapshot = try self.allocator.alloc([]const u8, names.entries.count());
+        const snapshot = try prepareSnapshot(self.allocator, names);
         errdefer self.allocator.free(snapshot);
         try self.reserve(names.entries.count());
         self.acquireReserved(names, snapshot);
@@ -43,21 +43,48 @@ pub const Index = struct {
         try self.entries.ensureTotalCapacity(self.allocator, total);
     }
 
-    /// Takes ownership of names without allocating. The caller provides the
+    /// Build and sort candidate pointers outside the publication guard.
+    pub fn prepareSnapshot(allocator: std.mem.Allocator, names: *const parse.Names) ![][]const u8 {
+        const snapshot = try allocator.alloc([]const u8, names.entries.count());
+        var keys = names.entries.keyIterator();
+        var i: usize = 0;
+        while (keys.next()) |key| : (i += 1) snapshot[i] = key.*;
+        std.mem.sort([]const u8, snapshot, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        return snapshot;
+    }
+
+    pub fn lowerBound(snapshot: Snapshot, name: []const u8) usize {
+        var low: usize = 0;
+        var high = snapshot.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (std.mem.lessThan(u8, snapshot[middle], name)) low = middle + 1 else high = middle;
+        }
+        return low;
+    }
+
+    pub fn snapshotContains(snapshot: Snapshot, name: []const u8) bool {
+        const i = lowerBound(snapshot, name);
+        return i < snapshot.len and std.mem.eql(u8, snapshot[i], name);
+    }
+
+    /// Takes ownership of pre-sorted names without allocating.
     /// snapshot buffer and reserves capacity for every acquisition in the batch.
     pub fn acquireReserved(self: *Index, names: *parse.Names, snapshot: [][]const u8) void {
         std.debug.assert(snapshot.len == names.entries.count());
-        var keys = names.entries.keyIterator();
-        var i: usize = 0;
-        while (keys.next()) |key| : (i += 1) {
-            const entry = self.entries.getOrPutAssumeCapacity(key.*);
+        for (snapshot) |*name| {
+            const entry = self.entries.getOrPutAssumeCapacity(name.*);
             if (entry.found_existing) {
-                self.allocator.free(key.*);
+                self.allocator.free(name.*);
                 entry.value_ptr.* += 1;
             } else {
                 entry.value_ptr.* = 1;
             }
-            snapshot[i] = entry.key_ptr.*;
+            name.* = entry.key_ptr.*;
         }
         names.entries.clearRetainingCapacity();
         // The caller owns snapshot; names now owns only its temporary hash table.
@@ -118,4 +145,22 @@ test "failed snapshot allocation preserves published and candidate names" {
     try std.testing.expect(index.contains("old.test"));
     try std.testing.expect(!index.contains("new.test"));
     try std.testing.expect(replacement.entries.contains("new.test"));
+}
+
+test "source slices are sorted and binary searches preserve exact semantics" {
+    const allocator = std.testing.allocator;
+    var index = Index.init(allocator);
+    defer index.deinit();
+    var names = try parse.parse(allocator, "z.test\nads.example.test\nads.test\na.test\n", .domains);
+    defer names.deinit();
+    const snapshot = try index.acquire(&names);
+    defer index.release(snapshot);
+    try std.testing.expectEqualStrings("a.test", snapshot[0]);
+    try std.testing.expectEqualStrings("ads.example.test", snapshot[1]);
+    try std.testing.expectEqualStrings("ads.test", snapshot[2]);
+    try std.testing.expectEqual(@as(usize, 1), Index.lowerBound(snapshot, "ads."));
+    try std.testing.expectEqual(@as(usize, 4), Index.lowerBound(snapshot, "zz"));
+    try std.testing.expect(Index.snapshotContains(snapshot, "ads.test"));
+    try std.testing.expect(!Index.snapshotContains(snapshot, "example.test"));
+    try std.testing.expect(!Index.snapshotContains(snapshot, "ADS.test"));
 }

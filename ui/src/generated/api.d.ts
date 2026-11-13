@@ -194,6 +194,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/blocklists/{id}/domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Browse a published RAM snapshot or a retained saved snapshot
+         * @description Imported names are read-only. Active and saved contents can differ after activation failure. Defaults to active for enabled sources and saved for disabled sources. Exact domain and prefix filters are mutually exclusive. Cursors bind to source, snapshot version, and filters; a changed snapshot returns 409. Never fetches the source.
+         */
+        get: operations["get_blocklist_domains"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/blocklists/matches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the source whose ID is literally matches */
+        get: operations["get_blocklists_reserved_matches_id"];
+        /** Replace the source whose ID is literally matches */
+        put: operations["put_blocklists_reserved_matches_id"];
+        /**
+         * Batch current active list memberships for visible domain names
+         * @description Read-only authenticated lookup, without If-Match or revision changes. Normalizes and deduplicates at most 100 input names. Returns only contributing active or degraded sources. These are memberships now, not historical blocking attribution.
+         */
+        post: operations["post_blocklist_matches"];
+        /** Delete the source whose ID is literally matches */
+        delete: operations["delete_blocklists_reserved_matches_id"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/blocklists": {
         parameters: {
             query?: never;
@@ -580,6 +623,37 @@ export interface components {
             api_managed: components["schemas"]["Source"]["api_managed"];
             readonly status: components["schemas"]["SourceHealth"];
         };
+        /** @description An active or degraded source currently containing a requested exact name. */
+        MembershipSource: {
+            id: string;
+            name: string | null;
+            status: components["schemas"]["SourceHealth"];
+        };
+        /** @description Current memberships only. Generation is process-local and must not be used as historical attribution. */
+        MembershipMatches: {
+            generation: number;
+            sources: components["schemas"]["MembershipSource"][];
+            matches: {
+                domain: string;
+                source_ids: string[];
+            }[];
+        };
+        ListDomainPage: {
+            source_id: string;
+            snapshot: {
+                /** @enum {string} */
+                kind: "active" | "saved";
+                /** @description Opaque content/publication version, not a source-definition fingerprint. */
+                version: string;
+                last_success_at_ms: number | null;
+                /** @description Total snapshot membership count, independent of filters. */
+                domain_count: number;
+                /** @description True only when this content is demonstrably the snapshot currently used by DNS. */
+                active: boolean;
+            };
+            items: string[];
+            next_cursor: string | null;
+        };
         RecordInput: {
             name: string;
             /** @enum {unknown} */
@@ -690,6 +764,9 @@ export interface components {
             local_record: boolean;
             /** @constant */
             upstream_queried: false;
+            /** @description Sources currently containing the name, regardless of policy overrides. */
+            matching_sources: components["schemas"]["MembershipSource"][];
+            membership_generation: number;
         };
         Cache: {
             capacity: number;
@@ -2356,6 +2433,241 @@ export interface operations {
             };
             /** @description Management queue full or server shutting down */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_blocklist_domains: {
+        parameters: {
+            query?: {
+                snapshot?: "active" | "saved";
+                /** @description Exact normalized ASCII name, case-insensitive with an optional trailing dot. */
+                domain?: string;
+                /** @description Case-insensitive ASCII name prefix, not suffix or wildcard matching. */
+                prefix?: string;
+                limit?: number;
+                after?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Alphabetically ordered snapshot contents. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListDomainPage"];
+                };
+            };
+            /** @description Invalid name, prefix, limit, cursor, or conflicting filters. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing, duplicate, or invalid API key. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description SourceNotFound or SnapshotUnavailable. An unavailable snapshot is distinct from a successfully imported empty list. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description StaleCursor: snapshot changed. Reload contents explicitly. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Snapshot reader unavailable or busy. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_blocklists_reserved_matches_id: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current source definition and health. */
+            200: {
+                headers: {
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceView"];
+                };
+            };
+            /** @description Authentication, lookup, or management error. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    put_blocklists_reserved_matches_id: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Quoted global revision. Missing returns 428, stale returns 412. */
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Source"];
+            };
+        };
+        responses: {
+            /** @description Accepted; poll the returned operation ID. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Accepted"];
+                };
+            };
+            /** @description Authentication, validation, revision, lookup, or writer-conflict error. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    post_blocklist_matches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    domains: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description One coherent observation of published memberships. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembershipMatches"];
+                };
+            };
+            /** @description Invalid domain names or batch bounds. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing, duplicate, or invalid API key. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Request exceeds the 64 KiB body limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Management queue full or server shutting down. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    delete_blocklists_reserved_matches_id: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Quoted global revision. Missing returns 428, stale returns 412. */
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted; poll the returned operation ID. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Accepted"];
+                };
+            };
+            /** @description Authentication, revision, lookup, or writer-conflict error. */
+            default: {
                 headers: {
                     [name: string]: unknown;
                 };

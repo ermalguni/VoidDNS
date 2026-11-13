@@ -44,6 +44,18 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .runtime-details > summary { font-weight: 600; }
 .runtime-details section { margin-block: 20px; }
 details > summary { cursor: pointer; margin-block: 12px; font-size: .875rem; }
+.domain-membership { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; white-space: normal; min-width: 0; }
+.domain-membership > a { overflow-wrap: anywhere; }
+.membership-pills { display: flex; align-items: start; flex-wrap: wrap; gap: 4px; max-width: 28rem; white-space: normal; }
+.membership-pill { display: inline-block; max-width: 100%; padding: 2px 7px; border: 1px solid var(--mantine-color-default-border); border-radius: var(--mantine-radius-sm); background: var(--mantine-color-teal-light); color: var(--mantine-color-teal-light-color); font-size: .7rem; line-height: 1.5; overflow-wrap: anywhere; text-decoration: none; }
+.membership-pill:hover { background: var(--mantine-color-teal-light-hover); text-decoration: underline; }
+.membership-pill:focus-visible, .membership-more > summary:focus-visible { outline: 2px solid var(--mantine-primary-color-filled); outline-offset: 2px; }
+.membership-more { min-width: 0; max-width: 100%; }
+.membership-more > summary { margin: 0; padding: 3px 6px; font-size: .75rem; color: var(--mantine-color-anchor); border-radius: var(--mantine-radius-sm); }
+.membership-overflow { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 4px; }
+.membership-inline { display: none; }
+.metrics-data .membership-column { white-space: normal; }
+.ranking-section .domain-membership { min-width: 7rem; }
 @media (max-width: 75em) { .metrics-tables { grid-template-columns: 1fr; } .metrics-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 48em) {
   .mantine-AppShell-main { padding-inline: 12px; }
@@ -53,5 +65,10 @@ details > summary { cursor: pointer; margin-block: 12px; font-size: .875rem; }
   .metrics-summary dd { font-size: 1.375rem; }
   .activity-panel { padding: 12px; }
   .chart-times span:nth-child(even) { display: none; }
+  .domain-membership { flex-direction: column; align-items: start; }
+  .membership-inline { display: block; }
+  .membership-column { display: none; }
+  .membership-pills { max-width: 16rem; }
+  .domain-inspection { flex: 0 0 100% !important; width: 100%; max-width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

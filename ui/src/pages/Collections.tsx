@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { Alert, Badge, Box, Button, Code, Divider, Drawer, Group, Loader, NumberInput, Paper, ScrollArea, Select, Stack, Switch, Table, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link, useSearchParams } from 'react-router-dom';
+import { DomainLink } from '../DomainInspection';
 import { ApiError, useApi, useWrite } from '../api';
 import type { Schema } from '../api';
 import { ErrorNotice, PageHeading } from '../components';
@@ -55,9 +57,9 @@ function domainError(value: string): string | null {
   return null;
 }
 
-function DomainForm({ initial, disabled, busy, onSubmit }: FormProps<Domain>) {
+function DomainForm({ initial, disabled, busy, onSubmit, prefill }: FormProps<Domain> & { prefill?: { domain: string; action: 'allow' | 'block' } }) {
   const form = useForm({
-    initialValues: { domain: initial?.domain ?? '', action: initial?.action ?? 'block' },
+    initialValues: { domain: initial?.domain ?? prefill?.domain ?? '', action: initial?.action ?? prefill?.action ?? 'block' },
     validate: { domain: domainError },
   });
   return (
@@ -151,7 +153,7 @@ function SnapshotReview({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
-function ResourceEditor({ kind, selection, onClose, onComplete }: { kind: Kind; selection: Selection; onClose: () => void; onComplete: () => void }) {
+export function ResourceEditor({ kind, selection, onClose, onComplete, prefill }: { kind: Kind; selection: Selection; onClose: () => void; onComplete: () => void; prefill?: { domain: string; action: 'allow' | 'block' } }) {
   const api = useApi();
   const writer = useWrite();
   const collectionPath = `/${kind}`;
@@ -201,7 +203,7 @@ function ResourceEditor({ kind, selection, onClose, onComplete }: { kind: Kind; 
   const disabled = needsReview || writer.busy;
   let form: ReactNode = null;
   if (baseline && (creating || editing)) {
-    if (kind === 'domains') form = <DomainForm initial={initial as Domain | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
+    if (kind === 'domains') form = <DomainForm initial={initial as Domain | undefined} prefill={creating ? prefill : undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
     if (kind === 'records') form = <RecordForm initial={initial as RecordSet | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
     if (kind === 'blocklists') form = <SourceForm initial={initial as Source | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
   }
@@ -242,17 +244,17 @@ function ResourceEditor({ kind, selection, onClose, onComplete }: { kind: Kind; 
 function ResourceCells({ kind, item }: { kind: Kind; item: Resource }) {
   if (kind === 'domains') {
     const domain = item as Domain;
-    return <><Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{domain.domain}</Text></Table.Td><Table.Td><Badge variant="light" color={domain.action === 'block' ? 'red' : 'teal'}>{domain.action}</Badge></Table.Td></>;
+    return <><Table.Td><DomainLink domain={domain.domain} /></Table.Td><Table.Td><Badge variant="light" color={domain.action === 'block' ? 'red' : 'teal'}>{domain.action}</Badge></Table.Td></>;
   }
   if (kind === 'records') {
     const record = item as RecordSet;
-    return <><Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{record.name}</Text></Table.Td><Table.Td><Badge variant="light" color="gray">{record.type}</Badge></Table.Td><Table.Td><Stack gap={2}>{record.addresses.map((address) => <Text key={address} size="sm" style={{ overflowWrap: 'anywhere' }}>{address}</Text>)}</Stack></Table.Td><Table.Td>{record.ttl}s</Table.Td></>;
+    return <><Table.Td><DomainLink domain={record.name} type={record.type === 'A' ? 1 : 28} /></Table.Td><Table.Td><Badge variant="light" color="gray">{record.type}</Badge></Table.Td><Table.Td><Stack gap={2}>{record.addresses.map((address) => <Text key={address} size="sm" style={{ overflowWrap: 'anywhere' }}>{address}</Text>)}</Stack></Table.Td><Table.Td>{record.ttl}s</Table.Td></>;
   }
   const source = item as SourceView;
   const status = source.status;
   const state = sourceStates[status.state];
   return <>
-    <Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{source.name || source.id}</Text>{source.name ? <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{source.id}</Text> : null}</Table.Td>
+    <Table.Td><Link to={`/blocklists/${encodeURIComponent(source.id)}`}>{source.name || source.id}</Link>{source.name ? <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{source.id}</Text> : null}<Text size="sm" mt={4}><Link to={`/blocklists/${encodeURIComponent(source.id)}`}>View domains</Link></Text></Table.Td>
     <Table.Td>
       <Stack gap={2}>
         <Badge variant="light" color={state.color}>{state.label}</Badge>
@@ -270,17 +272,28 @@ function CollectionPage({ kind }: { kind: Kind }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const route = `/${kind}`;
-  const [limit, setLimit] = useState(50);
-  const [filters, setFilters] = useState({ action: '', domain: '' });
-  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  const [search, setSearch] = useSearchParams();
+  const rawLimit = Number(search.get('limit') ?? 50);
+  const limit = Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 100 ? rawLimit : 50;
+  const filters = { action: search.get('action') ?? '', domain: search.get('domain') ?? '' };
+  const cursor = search.get('after');
   const [restarted, setRestarted] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
+  const createAllow = kind === 'domains' && search.get('create') === 'allow';
+  const activeSelection: Selection | null = selection ?? (createAllow ? { action: 'create' } : null);
   const filterForm = useForm({
-    initialValues: { action: '', domain: '', limit: 50 as number | string },
+    initialValues: { ...filters, limit: limit as number | string },
     validate: { domain: (value) => kind === 'domains' && value !== '' ? domainError(value) : null, limit: (value) => typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 100 ? null : 'Choose an integer from 1 to 100.' },
   });
+  useEffect(() => { filterForm.setValues({ action: search.get('action') ?? '', domain: search.get('domain') ?? '', limit }); }, [search, limit]);
+  function updateListing(values: { action?: string; domain?: string; limit?: number; after?: string | null }, replace = false) {
+    const next = new URLSearchParams(search);
+    for (const [key, value] of Object.entries(values)) { if (value) next.set(key, String(value)); else next.delete(key); }
+    if (!('after' in values) || values.after === null) { next.delete('after'); next.delete('previous'); }
+    setSearch(next, { replace });
+  }
+  function closeEditor() { setSelection(null); if (createAllow) { const next = new URLSearchParams(search); next.delete('create'); setSearch(next, { replace: true }); } }
   const params = new URLSearchParams({ limit: String(limit) });
-  const cursor = cursors[cursors.length - 1];
   if (cursor) params.set('after', cursor);
   if (kind === 'domains' && filters.action) params.set('action', filters.action);
   if (kind === 'domains' && filters.domain) params.set('domain', filters.domain);
@@ -290,14 +303,14 @@ function CollectionPage({ kind }: { kind: Kind }) {
 
   useEffect(() => {
     if (staleCursor && cursor) {
-      setCursors([null]);
+      const next = new URLSearchParams(search); next.delete('after'); next.delete('previous'); setSearch(next, { replace: true });
       setRestarted(true);
       void queryClient.invalidateQueries({ queryKey: [route] });
     }
-  }, [staleCursor, cursor, queryClient, route]);
+  }, [staleCursor, cursor, queryClient, route, search, setSearch]);
 
   function reload() {
-    setCursors([null]);
+    updateListing({ after: null });
     setRestarted(false);
     void queryClient.invalidateQueries({ queryKey: [route] });
   }
@@ -315,12 +328,12 @@ function CollectionPage({ kind }: { kind: Kind }) {
         <Button variant="default" loading={query.isFetching} onClick={reload}>Reload listing</Button>
       </Group>
       <Paper withBorder p="md">
-        <form onSubmit={filterForm.onSubmit((values) => { setFilters({ action: values.action, domain: values.domain }); setLimit(Number(values.limit)); setCursors([null]); setRestarted(false); })}>
+        <form onSubmit={filterForm.onSubmit((values) => { updateListing({ action: values.action, domain: values.domain, limit: Number(values.limit) }); setRestarted(false); })}>
           <Group align="start" gap="sm">
             {kind === 'domains' ? <><Select label="Action" data={[{ value: '', label: 'All actions' }, { value: 'block', label: 'Block' }, { value: 'allow', label: 'Allow' }]} allowDeselect={false} w={155} {...filterForm.getInputProps('action')} /><TextInput label="Exact domain name" placeholder="All names" maxLength={254} style={{ flex: '1 1 220px' }} {...filterForm.getInputProps('domain')} /></> : null}
             <NumberInput label="Rows per page" min={1} max={100} allowDecimal={false} allowNegative={false} w={140} {...filterForm.getInputProps('limit')} />
             <Button type="submit" variant="light" mt={25}>{kind === 'domains' ? 'Apply filters' : 'Apply limit'}</Button>
-            {kind === 'domains' && (filters.action || filters.domain) ? <Button variant="subtle" mt={25} onClick={() => { filterForm.setValues({ action: '', domain: '' }); setFilters({ action: '', domain: '' }); setCursors([null]); setRestarted(false); }}>Clear filters</Button> : null}
+            {kind === 'domains' && (filters.action || filters.domain) ? <Button variant="subtle" mt={25} onClick={() => { filterForm.setValues({ action: '', domain: '' }); updateListing({ action: '', domain: '' }); setRestarted(false); }}>Clear filters</Button> : null}
           </Group>
         </form>
       </Paper>
@@ -348,16 +361,16 @@ function CollectionPage({ kind }: { kind: Kind }) {
           ) : <Stack py="xl" gap="xs"><Title order={3}>{filters.action || filters.domain ? 'No matching domain rules' : `No ${labels[kind].title.toLowerCase()} yet`}</Title><Text c="dimmed">{filters.action || filters.domain ? 'Change the exact-name or action filter to see other rules.' : kind === 'blocklists' ? 'Add a URL or local file source. This view lists definitions, not individual imported names.' : kind === 'records' ? 'Add a record set to resolve an exact name directly from this server.' : 'Add an exact-name allow or block rule to control local policy.'}</Text></Stack>}
           <Divider my="md" />
           <Group justify="space-between">
-            <Text size="sm" c="dimmed" aria-live="polite">Page {cursors.length} · {page.items.length} {page.items.length === 1 ? 'entry' : 'entries'} · revision {page.revision}</Text>
+            <Text size="sm" c="dimmed" aria-live="polite">{cursor ? 'Continued page' : 'First page'} · {page.items.length} {page.items.length === 1 ? 'entry' : 'entries'} · revision {page.revision}</Text>
             <Group gap="xs">
-              <Button variant="default" disabled={cursors.length === 1 || query.isFetching} onClick={() => setCursors((current) => current.slice(0, -1))}>Back</Button>
-              <Button variant="default" disabled={!page.next_cursor || query.isFetching} onClick={() => { if (page.next_cursor) setCursors((current) => [...current, page.next_cursor]); }}>Next</Button>
+              <Button variant="default" disabled={!cursor || query.isFetching} onClick={() => { const next = new URLSearchParams(search); const previous = next.getAll('previous'); const after = previous.pop(); next.delete('previous'); previous.forEach(value => next.append('previous', value)); if (after) next.set('after', after); else next.delete('after'); setSearch(next); }}>Back</Button>
+              <Button variant="default" disabled={!page.next_cursor || query.isFetching} onClick={() => { if (page.next_cursor) { const next = new URLSearchParams(search); next.append('previous', cursor ?? ''); next.set('after', page.next_cursor); setSearch(next); } }}>Next</Button>
             </Group>
           </Group>
         </Box>
       ) : null}
       {kind === 'blocklists' ? <Text size="sm" c="dimmed">Refresh is not configuration reload. Restart and refresh fetch first, falling back only to a compatible saved snapshot. DNS lookups use RAM. Disabling retains the saved snapshot; deleting removes it.</Text> : null}
-      {selection ? <ResourceEditor key={`${selection.action}:${selection.id ?? ''}`} kind={kind} selection={selection} onClose={() => setSelection(null)} onComplete={() => { setSelection(null); setCursors([null]); setRestarted(false); }} /> : null}
+      {activeSelection ? <ResourceEditor key={`${activeSelection.action}:${activeSelection.id ?? ''}`} kind={kind} selection={activeSelection} prefill={createAllow ? { domain: filters.domain, action: 'allow' } : undefined} onClose={closeEditor} onComplete={() => { setSelection(null); const next = new URLSearchParams(search); next.delete('create'); next.delete('after'); next.delete('previous'); setSearch(next, { replace: true }); setRestarted(false); }} /> : null}
     </Stack>
   );
 }

@@ -4,6 +4,7 @@ import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useApi, type Schema } from '../api';
 import { ErrorNotice } from '../components';
+import { DomainLink, Memberships, useMemberships } from '../DomainInspection';
 
 const outcomes = ['blocked', 'cached', 'forwarded', 'local', 'rejected'] as const;
 type Counts = Schema<'MetricCounts'>;
@@ -131,6 +132,7 @@ export function MetricsOverview({ runtime }: { runtime?: {
   const queriedDomains = useMetric<(Counts & { domain: string })[]>('/metrics/domains', rankedQuery);
   const domainsQuery = new URLSearchParams(rankedQuery); domainsQuery.set('resolution', 'blocked');
   const domains = useMetric<(Counts & { domain: string })[]>('/metrics/domains', domainsQuery);
+  const memberships = useMemberships([...(queriedDomains.data?.data.data.map(row => row.domain) ?? []), ...(domains.data?.data.data.map(row => row.domain) ?? [])]);
   const queries = [summary, series, clients, queriedDomains, domains];
   const fetching = runtime?.fetching || healthFetching || queries.some(query => query.isFetching);
   const error = queries.find(query => query.error)?.error;
@@ -145,8 +147,12 @@ export function MetricsOverview({ runtime }: { runtime?: {
   function domainTable(title: string, response: typeof domains, blocked: boolean) {
     return <section className="ranking-section"><Title order={2} size="h3" mb="sm">{title}</Title>
       {response.isPending ? <Skeleton height={180} /> : response.data ? <>
-        <Table className="metrics-data"><Table.Thead><Table.Tr><Table.Th>Domain</Table.Th><Table.Th ta="right">{blocked ? 'Blocked' : 'Requests'}</Table.Th></Table.Tr></Table.Thead>
-          <Table.Tbody>{response.data.data.data.map(row => <Table.Tr key={row.domain}><Table.Td><Link to={history({ domain: row.domain, ...(blocked ? { resolution: 'blocked' } : {}) })}>{row.domain}</Link></Table.Td><Table.Td ta="right">{number.format(row.total)}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
+        <Table className="metrics-data"><Table.Thead><Table.Tr><Table.Th>Domain</Table.Th><Table.Th className="membership-column">Lists now</Table.Th><Table.Th ta="right">{blocked ? 'Blocked' : 'Requests'}</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>{response.data.data.data.map(row => <Table.Tr key={row.domain}>
+            <Table.Td><div className="domain-membership"><DomainLink domain={row.domain} window={w.query} /><div className="membership-inline"><Memberships domain={row.domain} result={memberships} window={w.query} /></div></div></Table.Td>
+            <Table.Td className="membership-column"><Memberships domain={row.domain} result={memberships} window={w.query} /></Table.Td>
+            <Table.Td ta="right">{number.format(row.total)}</Table.Td>
+          </Table.Tr>)}</Table.Tbody></Table>
         {response.data.data.data.length === 0 ? <Text size="sm" c="dimmed" my="md">No {blocked ? 'blocked ' : ''}requests in this period.</Text> : null}
       </> : <Text size="sm" c="dimmed">Domain statistics unavailable.</Text>}
       <Link className="ranking-more" to={history(blocked ? { resolution: 'blocked' } : {})}>View {blocked ? 'blocked ' : ''}requests →</Link>
@@ -243,6 +249,9 @@ export function RequestsPage() {
   const requests = useMetric<Request[]>('/requests', query);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [domain, setDomain] = useState(w.params.get('domain') ?? '');
+  const memberships = useMemberships(requests.data?.data.data.map(row => row.domain) ?? []);
+  const domainFilter = w.params.get('domain') ?? '';
+  useEffect(() => { setDomain(domainFilter); }, [domainFilter]);
   return <Stack gap="lg"><Title order={1}>Request history</Title><WindowControls window={w} refresh={w.refresh} /><HealthNotice />
     <Group align="end"><Select label="Outcome" clearable value={w.params.get('resolution')} data={outcomes.map(value => ({ value, label: value }))} onChange={value => w.set('resolution', value)} />
       <form onSubmit={event => { event.preventDefault(); w.set('domain', domain || null); }}><Group align="end"><TextInput label="Exact domain" value={domain} onChange={event => setDomain(event.currentTarget.value)} /><Button type="submit" variant="default">Filter</Button></Group></form>
@@ -252,8 +261,21 @@ export function RequestsPage() {
       <Checkbox label="Errors only" checked={w.params.get('errors') === 'true'} onChange={event => w.set('errors', event.currentTarget.checked ? 'true' : null)} mb={8} />
     </Group><ErrorNotice error={requests.error} />
     <Text size="sm" c="dimmed">History stays still while you inspect it. Refresh to see new requests. All times use your browser’s timezone.</Text>
+    <Text size="xs" c="dimmed">List pills show current active memberships, not which source caused a recorded outcome.</Text>
     {requests.isPending ? <Skeleton height={200} /> : null}
-    <Table.ScrollContainer minWidth={850}><Table className="metrics-data"><Table.Thead><Table.Tr>{['Time', 'Client', 'Domain', 'Type', 'Outcome', 'Duration', 'Details'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead><Table.Tbody>{requests.data?.data.data.map(row => <Table.Tr key={row.id}><Table.Td>{date(row.received_at_ms)}</Table.Td><Table.Td><Link to={`/clients?client_id=${row.client_id}`}>{row.client_name ?? row.ip_address}</Link></Table.Td><Table.Td>{row.domain ?? 'Unavailable'}{expanded === row.id ? <Text size="xs" mt="xs">{row.transport.toUpperCase()} · Class {row.query_class ?? 'unknown'} · RCODE {row.rcode ?? 'none'} · {row.error ?? 'No processing error'}</Text> : null}</Table.Td><Table.Td>{row.query_type === 1 ? 'A' : row.query_type === 28 ? 'AAAA' : row.query_type ?? 'Unknown'}</Table.Td><Table.Td><Badge color={colors[row.resolution]} variant="light">{row.resolution}</Badge>{row.error ? <Text size="xs" c="red">Error</Text> : null}</Table.Td><Table.Td>{(row.duration_us / 1000).toFixed(2)} ms</Table.Td><Table.Td><Button size="xs" variant="subtle" aria-expanded={expanded === row.id} onClick={() => setExpanded(expanded === row.id ? null : row.id)}>{expanded === row.id ? 'Hide' : 'Show'}</Button></Table.Td></Table.Tr>)}</Table.Tbody></Table></Table.ScrollContainer>
+    <Table.ScrollContainer minWidth={850}><Table className="metrics-data">
+      <Table.Thead><Table.Tr>{['Time', 'Client', 'Domain', 'Lists now', 'Type', 'Outcome', 'Duration', 'Details'].map(label => <Table.Th key={label} className={label === 'Lists now' ? 'membership-column' : undefined}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
+      <Table.Tbody>{requests.data?.data.data.map(row => <Table.Tr key={row.id}>
+        <Table.Td>{date(row.received_at_ms)}</Table.Td>
+        <Table.Td><Link to={`/clients?client_id=${row.client_id}`}>{row.client_name ?? row.ip_address}</Link></Table.Td>
+        <Table.Td>{row.domain ? <div className="domain-membership"><DomainLink domain={row.domain} type={row.query_type} outcome={row.resolution} window={w.query} /><div className="membership-inline"><Memberships domain={row.domain} result={memberships} window={w.query} /></div></div> : 'Unavailable'}{expanded === row.id ? <Text size="xs" mt="xs">{row.transport.toUpperCase()} · Class {row.query_class ?? 'unknown'} · RCODE {row.rcode ?? 'none'} · {row.error ?? 'No processing error'}</Text> : null}</Table.Td>
+        <Table.Td className="membership-column">{row.domain ? <Memberships domain={row.domain} result={memberships} window={w.query} /> : 'Unavailable'}</Table.Td>
+        <Table.Td>{row.query_type === 1 ? 'A' : row.query_type === 28 ? 'AAAA' : row.query_type ?? 'Unknown'}</Table.Td>
+        <Table.Td><Badge color={colors[row.resolution]} variant="light">{row.resolution}</Badge>{row.error ? <Text size="xs" c="red">Error</Text> : null}</Table.Td>
+        <Table.Td>{(row.duration_us / 1000).toFixed(2)} ms</Table.Td>
+        <Table.Td><Button size="xs" variant="subtle" aria-expanded={expanded === row.id} onClick={() => setExpanded(expanded === row.id ? null : row.id)}>{expanded === row.id ? 'Hide' : 'Show'}</Button></Table.Td>
+      </Table.Tr>)}</Table.Tbody>
+    </Table></Table.ScrollContainer>
     {requests.data?.data.data.length === 0 ? <Text>No recorded requests match these filters.</Text> : null}
     {requests.data?.data.next ? <Button variant="default" onClick={() => w.set('after', requests.data!.data.next)}>Older requests</Button> : null}
   </Stack>;

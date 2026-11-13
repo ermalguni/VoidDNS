@@ -51,8 +51,9 @@ all `/api/v1` requests remain authenticated. With API/UI enabled respectively:
 `true/true` serves both, `true/false` serves API only (frontend `404`),
 `false/false` serves DNS only with no HTTP listener or key loading, and
 `false/true` is invalid. Missing assets and unknown frontend routes return `404`;
-direct navigation supports `/`, `/domains`, `/records`, `/blocklists`, `/policy`,
-`/settings`, and `/configuration`.
+direct navigation supports `/`, `/domains`, `/records`, `/blocklists`,
+`/blocklists/{id}`, `/policy`, `/settings`, `/configuration`, `/clients`, and
+`/requests`.
 
 Schema 1 is unsupported; migrate to `schema_version: 2` and explicitly add both
 objects. There is no legacy compatibility mode or implicit disabled API.
@@ -93,7 +94,8 @@ same-origin deployment, not an administrator key in a public bundle.
 ## Endpoint reference
 
 All endpoints require `X-API-Key`. Every state-changing request requires
-`If-Match`; `POST /config/validate` is read-only and does not require it.
+`If-Match`; `POST /config/validate` and `POST /blocklists/matches` are read-only
+and do not require it.
 `Accepted` below means the asynchronous response described under Operations.
 Action and DELETE requests need no body unless a body is explicitly listed.
 
@@ -121,6 +123,9 @@ Action and DELETE requests need no body unless a body is explicitly listed.
 | GET | `/blocklists/{id}` | Read source definition | `200` Source |
 | PUT | `/blocklists/{id}` | Replace Source; body ID must match path ID | `202` Accepted |
 | DELETE | `/blocklists/{id}` | Remove source and its imported membership | `202` Accepted |
+| GET | `/blocklists/{id}/domains` | Browse active/saved imported names, exact/prefix filters | `200` ListDomainPage |
+| POST | `/blocklists/matches` | `{"domains":["example.test"]}`, up to 100 names; read-only | `200` MembershipMatches |
+| GET/PUT/DELETE | `/blocklists/matches` | Ordinary source operations when the ID is literally `matches`; POST remains the read-only batch action | Same as source item |
 | POST | `/blocklists/{id}/refresh` | Load one source using its active definition | `202` Accepted |
 | POST | `/blocklists/refresh` | Atomically refresh all enabled sources | `202` Accepted |
 | GET | `/blocklists/refresh` | Read source whose ID is literally `refresh` | `200` Source |
@@ -224,7 +229,64 @@ Reload retains unchanged imported snapshots; it is **not refresh**. Refresh uses
 active definitions, not unapplied disk edits. Disabled-source refresh is a no-op;
 unknown source IDs return `404`. Refresh-all is all-or-nothing. Removing one
 source preserves domains still supplied by another source. Imported snapshots
-are RAM-only and rebuild on restart.
+persist separately in SQLite and populate RAM indexes; DNS never queries SQLite.
+Failed fetches can use a compatible saved snapshot without rewriting definitions.
+
+#### Imported contents and current memberships
+
+`GET /blocklists/{id}/domains` returns:
+
+```json
+{
+  "source_id":"example-list",
+  "snapshot":{
+    "kind":"active",
+    "version":"opaque-content-version",
+    "last_success_at_ms":1760000000000,
+    "domain_count":2,
+    "active":true
+  },
+  "items":["ads.example.test","tracker.example.test"],
+  "next_cursor":null
+}
+```
+
+Names sort alphabetically. `limit` is 1–100, default 50. Use either `domain`
+(normalized exact name) or `prefix` (case-insensitive ASCII prefix), never both.
+Select `snapshot=active|saved`; omitted defaults to active for enabled sources
+and saved for disabled sources. Active reads use the published RAM snapshot.
+Saved reads inspect durable contents without fetching the source.
+
+Saved contents can be newer than RAM after activation failure. `snapshot.active`
+is true only when the displayed content is demonstrably in use by DNS. Disabled
+sources retain saved contents but never contribute active memberships.
+`404 SnapshotUnavailable` differs from an imported empty list. Follow opaque
+`next_cursor` using `after`, preserving source, snapshot, and filters. A replaced
+snapshot returns `409 StaleCursor`; explicitly reload instead of merging versions.
+
+Batch visible names with read-only `POST /blocklists/matches`:
+
+```json
+{"domains":["Ads.Example.Test.","tracker.example.test"]}
+```
+
+The server normalizes and deduplicates at most 100 names. The response contains:
+
+- `generation`: process-local published-membership observation.
+- `sources`: contributing source metadata once per ID, with `id`, nullable
+  `name`, and response-only `status` using the SourceHealth schema.
+- `matches`: normalized `domain` and `source_ids` for each unique requested name.
+  Empty IDs mean no active match, not a failed lookup.
+
+Only active/degraded sources contribute; degraded sources use fallback contents
+already published in RAM. This POST requires no `If-Match`, changes no revision,
+and performs no import. `GET /policy/check` also includes `matching_sources` and
+`membership_generation`, even if an explicit rule or local record overrides them.
+
+These fields describe membership **now**, never which list caused a historical
+request to be blocked. Telemetry retains recorded outcomes, not historical list
+versions or blocking attribution. Imported names are read-only; an explicit
+allow rule bypasses imported blocks but not an explicit block.
 
 ### Settings and full configuration
 
@@ -374,7 +436,9 @@ does not detect external file edits.
 
 Response fields: normalized `name`, numeric `type`, `decision` (`block`, `local`,
 `forward`), `reason`, `exact: true`, booleans `explicit_block`, `explicit_allow`,
-`imported_block`, `local_record`, and `upstream_queried: false`.
+`imported_block`, `local_record`, `upstream_queried: false`, `matching_sources`,
+and `membership_generation`. Matching sources describe current published list
+contents, not the cause of an earlier recorded outcome.
 Reasons are `explicit_block`, `explicit_allow`, `local_record`,
 `imported_blocklist`, and `default_forward`.
 

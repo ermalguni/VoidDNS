@@ -11,6 +11,7 @@ const bridge = @import("bridge.zig");
 const domain = @import("../domains/domain.zig");
 const security = @import("../blocklist/security.zig");
 const logging = @import("../logging.zig");
+const membership = @import("membership.zig");
 const Document = document.Document;
 const Record = std.meta.Elem(@FieldType(Document, "records"));
 const Source = std.meta.Elem(@FieldType(@FieldType(Document, "blocks"), "lists"));
@@ -130,6 +131,7 @@ pub const Management = struct {
 
     fn dispatch(context: *anyopaque, allocator: std.mem.Allocator, request: bridge.Request) !bridge.Response {
         const self: *Management = @ptrCast(@alignCast(context));
+        if (membership.owns(request)) return membership.handle(self.state, self.io, allocator, request);
         const metrics = @import("../telemetry/api.zig");
         if (metrics.owns(request.path) and eq(request.method, "GET")) {
             if (self.telemetry) |store| return metrics.handle(store, allocator, request);
@@ -293,6 +295,7 @@ pub const Management = struct {
     }
 
     fn handle(self: *Management, a: std.mem.Allocator, request: bridge.Request) !bridge.Response {
+        if (membership.owns(request)) return membership.handle(self.state, self.io, a, request);
         if (!std.mem.startsWith(u8, request.path, "/api/v1/")) return failure(a, 404, "NotFound", self.revision);
         const path = request.path[8..];
         const get = eq(request.method, "GET");
@@ -456,18 +459,37 @@ pub const Management = struct {
         const name = try domain.normalize(raw, &buffer);
         const raw_type = (try parameter(a, query, "type")) orelse "A";
         const qtype: u16 = if (eq(raw_type, "A")) 1 else if (eq(raw_type, "AAAA")) 28 else try std.fmt.parseInt(u16, raw_type, 10);
-        self.state.mutex.lockUncancelable(self.io);
-        defer self.state.mutex.unlock(self.io);
+        var matching: std.ArrayList(membership.Source) = .empty;
         var local = false;
-        for (self.state.records) |record| if (eq(record.name, name)) {
-            if (@backingInt(record.recordType()) == qtype) local = true;
-        };
-        const explicit_block = self.state.domains.isBlocked(name);
-        const explicit_allow = self.state.domains.isAllowed(name);
-        const imported = self.state.lists.contains(name);
-        const decision = @import("../policy/policy.zig").decide(self.state, name, local);
+        var explicit_block = false;
+        var explicit_allow = false;
+        var imported = false;
+        var decision: @import("../policy/policy.zig").Decision = undefined;
+        var generation: u64 = undefined;
+        {
+            self.state.mutex.lockUncancelable(self.io);
+            defer self.state.mutex.unlock(self.io);
+            for (self.state.records) |record| if (eq(record.name, name)) {
+                if (@backingInt(record.recordType()) == qtype) local = true;
+            };
+            explicit_block = self.state.domains.isBlocked(name);
+            explicit_allow = self.state.domains.isAllowed(name);
+            imported = self.state.lists.contains(name);
+            decision = @import("../policy/policy.zig").decide(self.state, name, local);
+            generation = self.state.lists.generation;
+            var entries = self.state.lists.sources.valueIterator();
+            while (entries.next()) |entry| {
+                if (!membership.contributes(entry.health) or !@import("../blocklist/index.zig").Index.snapshotContains(entry.snapshot, name)) continue;
+                try matching.append(a, try membership.copySource(a, entry.source.id, entry.source.name, entry.health));
+            }
+        }
+        std.mem.sort(membership.Source, matching.items, {}, struct {
+            fn less(_: void, left: membership.Source, right: membership.Source) bool {
+                return std.mem.lessThan(u8, left.id, right.id);
+            }
+        }.less);
         const reason: []const u8 = if (explicit_block) "explicit_block" else if (explicit_allow and !local) "explicit_allow" else if (local) "local_record" else if (imported) "imported_blocklist" else "default_forward";
-        return json(a, 200, .{ .name = name, .type = qtype, .decision = decision, .reason = reason, .exact = true, .explicit_block = explicit_block, .explicit_allow = explicit_allow, .imported_block = imported, .local_record = local, .upstream_queried = false }, self.revision);
+        return json(a, 200, .{ .name = name, .type = qtype, .decision = decision, .reason = reason, .exact = true, .explicit_block = explicit_block, .explicit_allow = explicit_allow, .imported_block = imported, .local_record = local, .upstream_queried = false, .matching_sources = matching.items, .membership_generation = generation }, self.revision);
     }
 
     fn collection(self: *Management, a: std.mem.Allocator, comptime kind: []const u8, id: ?[]const u8, query: []const u8) !bridge.Response {

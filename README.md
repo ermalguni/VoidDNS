@@ -45,8 +45,9 @@ serves the public UI and authenticated `/api/v1` namespace on the shared
 `api.listen` listener, default **http://127.0.0.1:8080**. Node.js is build-only;
 no separate UI server, launcher, or reverse proxy is required.
 UI assets do not contain an API key. Frontend routes `/`, `/domains`, `/records`,
-`/blocklists`, `/policy`, `/settings`, and `/configuration` support direct navigation;
-unknown routes and missing assets return `404`.
+`/blocklists`, `/blocklists/{id}`, `/policy`, `/settings`, `/configuration`,
+`/clients`, and `/requests` support direct navigation; unknown routes and missing
+assets return `404`.
 Keep management HTTP on loopback or a restricted network. Remote access requires
 HTTPS termination and appropriate network controls.
 
@@ -63,6 +64,33 @@ Conflicts preserve editor drafts and require explicit current-state review;
 expired pagination cursors restart the listing. If polling is interrupted, use
 **Resume operation polling** before another write; after a server restart,
 sign out and reconnect because operation IDs and revisions are process-local.
+
+### Browsing imported domains
+
+Open **Blocklists → source name → Domains** to inspect imported names. Search
+by exact name or ASCII prefix and page through alphabetical results. Imported
+rows are read-only: use an explicit allow rule to bypass imported blocking,
+subject to higher-priority explicit blocks.
+
+The snapshot selector distinguishes **Active** (published RAM used by DNS) from
+**Saved** (durable import). Disabled sources can retain saved contents without
+contributing to blocking. Degraded sources still serve a compatible saved
+snapshot in RAM. Saved and active contents can differ after failed activation;
+the view labels whether the displayed snapshot is active. No available snapshot
+is distinct from a successfully imported empty list. If a snapshot changes while
+paging, reload the contents rather than combining versions.
+
+Request history and domain summaries show clickable **Lists now** pills, with
+additional memberships behind **+N**. Click a pill to inspect that source's exact
+domain membership, or click a domain to inspect current policy, explicit rules,
+local records, and containing active lists. **View requests** opens exact-name
+history. Filters and domain inspection are URL-addressable.
+
+**Recorded outcome** describes the original request; **Policy now** and list
+pills describe current state. They are not historical attribution. A refresh or
+rule change can make current memberships differ from those present at query
+time. Disabled sources never appear as active membership pills. Lookup failures
+are shown as unavailable, never as an empty match.
 
 ## Building
 
@@ -725,6 +753,12 @@ names. The JSON file remains authoritative for definitions, enabled flags,
 explicit rules, and local records. Stored snapshots never recreate deleted JSON
 definitions. DNS policy checks use only the RAM index, never SQLite.
 
+Snapshot database schema 2 migrates schema 1 automatically at startup. It adds
+opaque content versions and an ordered per-source name index for bounded saved
+browsing. The index duplicates names on disk, not in DNS runtime objects. The
+database uses WAL and an independent management reader; keep the database and
+sidecars together when managing persistence.
+
 A saved snapshot is eligible only when its source fingerprint matches the active
 definition and import semantic version. The fingerprint covers source kind,
 location and format, API-managed provenance, private-source access policy,
@@ -977,6 +1011,8 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 | `GET/PUT/DELETE /records/{id}` | Read, replace, or delete a record set |
 | `GET /blocklists`, `POST /blocklists` | List definitions with runtime health, or create a blocklist source definition |
 | `GET/PUT/DELETE /blocklists/{id}` | Read, replace, or delete a source |
+| `GET /blocklists/{id}/domains` | Read-only alphabetical browsing of an active or saved imported snapshot |
+| `POST /blocklists/matches` | Read-only batch of current active memberships for up to 100 domain names; no `If-Match` |
 | `POST /blocklists/{id}/refresh` | Refresh one source from its active definition |
 | `POST /blocklists/refresh` | Atomically refresh all enabled sources |
 | `GET /operations/{id}` | Poll a running or recently completed operation |
@@ -986,9 +1022,10 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 
 Status readiness means the DNS listener is running, not that upstream resolvers
 are healthy. Policy checks accept `A`, `AAAA`, or a numeric DNS type and assume
-class IN. They report the normalized name, decision, reason, and matching
-explicit/imported/local conditions. There are no imported allowlists,
-diagnostic-resolution endpoints, or peer endpoints.
+class IN. They report the normalized name, decision, reason, matching
+explicit/imported/local conditions, `matching_sources`, and a process-local
+`membership_generation`. There are no imported allowlists, diagnostic-resolution
+endpoints, or peer endpoints.
 
 Domain request bodies contain `{"domain":"example.test","action":"block"}` or
 `"allow"`. Their deterministic IDs are `block:example.test` and
@@ -1004,6 +1041,21 @@ cursor. IDs sort lexicographically. Cursors include the revision: after a
 completed mutation, a stale cursor returns `409` and the client must restart
 its listing. Domain collections additionally accept `action=allow|block` and
 an exact, normalized `domain` filter.
+
+List contents use a separate snapshot-qualified response:
+`{source_id, snapshot, items, next_cursor}`. `snapshot` includes `kind`, opaque
+`version`, `last_success_at_ms`, total `domain_count`, and `active`. Select
+`snapshot=active|saved`; the default is active for enabled sources and saved for
+disabled sources. Optional `domain` (exact normalized name) and `prefix` filters
+are mutually exclusive. `limit` is 1–100, default 50. Keep source, snapshot, and
+filters unchanged when sending `after`; replaced snapshots return
+`409 StaleCursor`. Missing contents return `404 SnapshotUnavailable`.
+
+`POST /blocklists/matches` accepts `{"domains":["example.test","other.test"]}`.
+It normalizes and deduplicates names and returns `{generation, sources, matches}`;
+each match contains `domain` and `source_ids`. Source metadata is returned once.
+Only published active/degraded memberships contribute. It does not fetch sources,
+write configuration, require `If-Match`, or advance the revision.
 
 ### Revisions, operations, and persistence
 

@@ -5,6 +5,7 @@ import { useBeforeUnload, useBlocker } from 'react-router-dom';
 import { ApiError, RawJson, useApi, useWrite, type Schema } from '../api';
 import { ErrorNotice, PageHeading } from '../components';
 import { MetricsOverview } from './Metrics';
+import { CurrentPolicyResult } from '../DomainInspection';
 
 type Snapshot<T> = { data: T; etag: string; raw: string };
 
@@ -348,13 +349,6 @@ function ConfigurationEditor({ initial }: { initial: Snapshot<Schema<'Config'>> 
   </Stack>;
 }
 
-const policyReasons: Record<Schema<'Policy'>['reason'], string> = {
-  explicit_block: 'An explicit block matches this exact name. Explicit blocks take precedence over allows and local records.',
-  explicit_allow: 'An explicit allow bypasses imported blocklists. Matching local records can still answer; otherwise normal cache/upstream handling applies.',
-  local_record: 'A local record set matches this exact name and IN question type.',
-  imported_blocklist: 'This exact name appears in an enabled imported blocklist, with no higher-priority policy allowing it.',
-  default_forward: 'No blocking or local-answer policy applies. Normal cache/upstream handling would follow.',
-};
 
 export function PolicyPage() {
   const api = useApi();
@@ -378,17 +372,6 @@ export function PolicyPage() {
     <form onSubmit={(event) => { event.preventDefault(); check(); }}><Stack><SimpleGrid cols={{ base: 1, sm: 2 }}><TextInput label="DNS name" description="Exact normalized ASCII name; punycode is supported. No wildcards." placeholder="home.example.test" required value={name} onChange={(event) => setName(event.currentTarget.value)} /><Select label="Question type" allowDeselect={false} data={[{ value: 'A', label: 'A · IPv4' }, { value: 'AAAA', label: 'AAAA · IPv6' }, { value: 'numeric', label: 'Numeric DNS type' }]} value={type} onChange={(value) => { if (value) setType(value); }} /></SimpleGrid>{type === 'numeric' && <TextInput label="Numeric DNS type" description="0–65535; assumes class IN" inputMode="numeric" required value={numeric} onChange={(event) => setNumeric(event.currentTarget.value)} maw={320} />}<Button type="submit" loading={query.isFetching} style={{ alignSelf: 'flex-start' }}>Check policy</Button></Stack></form>
     <ErrorNotice error={inputError || query.error} />
     {!path && <Text c="dimmed" size="sm">Enter a name to see which rule takes precedence. This tool does not resolve addresses or test upstream reachability.</Text>}
-    {result && <section aria-labelledby="policy-result-heading" aria-live="polite">
-      <Group justify="space-between" mb="md"><Title id="policy-result-heading" order={2} size="h3">Decision for {result.name}</Title><Badge color={result.decision === 'block' ? 'red' : result.decision === 'local' ? 'teal' : 'blue'} variant="light">{result.decision === 'block' ? 'Block' : result.decision === 'local' ? 'Local answer' : 'Forward policy'}</Badge></Group>
-      <Text mb="xs">{policyReasons[result.reason]}</Text><Text size="sm" c="dimmed" mb="md">Type {result.type} · class IN · exact-name matching · revision {query.data?.etag}</Text>
-      <Table><Table.Tbody>
-        <Table.Tr><Table.Th>Reason</Table.Th><Table.Td><Code>{result.reason}</Code></Table.Td></Table.Tr>
-        <Table.Tr><Table.Th>Explicit block</Table.Th><Table.Td>{result.explicit_block ? 'Match' : 'No match'}</Table.Td></Table.Tr>
-        <Table.Tr><Table.Th>Explicit allow</Table.Th><Table.Td>{result.explicit_allow ? 'Match' : 'No match'}</Table.Td></Table.Tr>
-        <Table.Tr><Table.Th>Imported blocklist</Table.Th><Table.Td>{result.imported_block ? 'Match' : 'No match'}</Table.Td></Table.Tr>
-        <Table.Tr><Table.Th>Local record for this type</Table.Th><Table.Td>{result.local_record ? 'Match' : 'No match'}</Table.Td></Table.Tr>
-      </Table.Tbody></Table>
-      <Alert color="blue" title="Policy only · no upstream query" mt="md">A forward decision does not resolve the name or guarantee an upstream request: a real query may be answered by cache. Local and blocking answers are not tested by this check.</Alert>
-    </section>}
+    {result && !query.isError ? <section aria-label={`Current policy for ${result.name}`} aria-live="polite"><Title order={2} size="h3" mb="md">Decision for {result.name}</Title><CurrentPolicyResult result={result} revision={query.data?.etag ?? ''} /></section> : null}
   </Stack>;
 }

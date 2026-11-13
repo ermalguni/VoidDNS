@@ -18,7 +18,13 @@ fn isFrontendRoute(path: []const u8) bool {
         .{ "/clients", {} },
         .{ "/requests", {} },
     });
-    return routes.has(path);
+    if (routes.has(path)) return true;
+    const prefix = "/blocklists/";
+    if (!std.mem.startsWith(u8, path, prefix)) return false;
+    const id = path[prefix.len..];
+    if (id.len == 0 or id.len > 128 or std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return false;
+    for (id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '_' and byte != '-') return false;
+    return true;
 }
 
 fn find(path: []const u8) ?*const embedded.Asset {
@@ -58,7 +64,7 @@ pub fn serve(enabled: bool, req: *httpz.Request, res: *httpz.Response) Result {
 }
 
 test "only declared SPA routes resolve to the production index" {
-    for ([_][]const u8{ "/", "/domains", "/records", "/blocklists", "/policy", "/settings", "/configuration", "/clients", "/requests" }) |path| {
+    for ([_][]const u8{ "/", "/domains", "/records", "/blocklists", "/blocklists/hagezi-pro", "/blocklists/source_1.2", "/policy", "/settings", "/configuration", "/clients", "/requests" }) |path| {
         var request = httpz.testing.init(.{});
         defer request.deinit();
         request.url(path);
@@ -67,7 +73,7 @@ test "only declared SPA routes resolve to the production index" {
         try request.expectHeader("Content-Type", "text/html; charset=utf-8");
         try request.expectHeader("Cache-Control", "no-cache");
     }
-    for ([_][]const u8{ "/unknown", "/domains/nested", "/assets/missing.js", "/favicon-missing.ico", "/../index.html", "/%69ndex.html" }) |path| {
+    for ([_][]const u8{ "/unknown", "/domains/nested", "/blocklists/", "/blocklists/.", "/blocklists/..", "/blocklists/a/domains", "/blocklists/%2e%2e", "/blocklists/bad%2fid", "/assets/missing.js", "/favicon-missing.ico", "/../index.html", "/%69ndex.html" }) |path| {
         var request = httpz.testing.init(.{});
         defer request.deinit();
         request.url(path);

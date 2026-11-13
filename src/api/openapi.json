@@ -3,7 +3,7 @@
   "info": {
     "title": "VoidDNS management API",
     "version": "1.0.0",
-    "description": "Configuration-backed single-server management with an embedded public UI and authenticated API on one HTTP listener. DNS caches and imported contents remain RAM-only. SQLite stores seven days of client request telemetry. No peer synchronization. All API endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API and UI settings, including the shared HTTP listener, require restart; live changes are rejected before saving or publication. Mutations require quoted If-Match and persistent mutations complete asynchronously. Client names persist synchronously in SQLite; incoming telemetry does not advance the global revision."
+    "description": "Configuration-backed single-server management with an embedded public UI and authenticated API on one HTTP listener. DNS response caches and active filtering lookups remain RAM-only. Imported snapshots persist in a separate SQLite database; SQLite also stores seven days of client request telemetry. No peer synchronization. All API endpoints require X-API-Key. Application errors are JSON; malformed HTTP framing and parser-level limits may produce plaintext errors from the HTTP library. API and UI settings, including the shared HTTP listener, require restart; live changes are rejected before saving or publication. Mutations require quoted If-Match and persistent mutations complete asynchronously. Client names persist synchronously in SQLite; incoming telemetry does not advance the global revision."
   },
   "servers": [
     {
@@ -1839,6 +1839,79 @@
               }
             }
           }
+        }
+      }
+    },
+    "/blocklists/{id}/domains": {
+      "get": {
+        "summary": "Browse a published RAM snapshot or a retained saved snapshot",
+        "description": "Imported names are read-only. Active and saved contents can differ after activation failure. Defaults to active for enabled sources and saved for disabled sources. Exact domain and prefix filters are mutually exclusive. Cursors bind to source, snapshot version, and filters; a changed snapshot returns 409. Never fetches the source.",
+        "operationId": "get_blocklist_domains",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "snapshot", "in": "query", "schema": { "type": "string", "enum": ["active", "saved"] } },
+          { "name": "domain", "in": "query", "description": "Exact normalized ASCII name, case-insensitive with an optional trailing dot.", "schema": { "type": "string", "maxLength": 254 } },
+          { "name": "prefix", "in": "query", "description": "Case-insensitive ASCII name prefix, not suffix or wildcard matching.", "schema": { "type": "string", "maxLength": 253 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } },
+          { "name": "after", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Alphabetically ordered snapshot contents.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ListDomainPage" } } } },
+          "400": { "description": "Invalid name, prefix, limit, cursor, or conflicting filters.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Missing, duplicate, or invalid API key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "SourceNotFound or SnapshotUnavailable. An unavailable snapshot is distinct from a successfully imported empty list.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "StaleCursor: snapshot changed. Reload contents explicitly.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "Snapshot reader unavailable or busy.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/blocklists/matches": {
+      "post": {
+        "summary": "Batch current active list memberships for visible domain names",
+        "description": "Read-only authenticated lookup, without If-Match or revision changes. Normalizes and deduplicates at most 100 input names. Returns only contributing active or degraded sources. These are memberships now, not historical blocking attribution.",
+        "operationId": "post_blocklist_matches",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": { "domains": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 254 } } },
+            "required": ["domains"],
+            "additionalProperties": false
+          } } }
+        },
+        "responses": {
+          "200": { "description": "One coherent observation of published memberships.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MembershipMatches" } } } },
+          "400": { "description": "Invalid domain names or batch bounds.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Missing, duplicate, or invalid API key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "413": { "description": "Request exceeds the 64 KiB body limit.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "Management queue full or server shutting down.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "get": {
+        "summary": "Read the source whose ID is literally matches",
+        "operationId": "get_blocklists_reserved_matches_id",
+        "responses": {
+          "200": { "description": "Current source definition and health.", "headers": { "ETag": { "schema": { "type": "string" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SourceView" } } } },
+          "default": { "description": "Authentication, lookup, or management error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "put": {
+        "summary": "Replace the source whose ID is literally matches",
+        "operationId": "put_blocklists_reserved_matches_id",
+        "parameters": [{ "name": "If-Match", "in": "header", "required": true, "schema": { "type": "string" }, "description": "Quoted global revision. Missing returns 428, stale returns 412." }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Source" } } } },
+        "responses": {
+          "202": { "description": "Accepted; poll the returned operation ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Accepted" } } } },
+          "default": { "description": "Authentication, validation, revision, lookup, or writer-conflict error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "delete": {
+        "summary": "Delete the source whose ID is literally matches",
+        "operationId": "delete_blocklists_reserved_matches_id",
+        "parameters": [{ "name": "If-Match", "in": "header", "required": true, "schema": { "type": "string" }, "description": "Quoted global revision. Missing returns 428, stale returns 412." }],
+        "responses": {
+          "202": { "description": "Accepted; poll the returned operation ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Accepted" } } } },
+          "default": { "description": "Authentication, revision, lookup, or writer-conflict error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -4928,6 +5001,62 @@
         "required": ["id", "name", "enabled", "source", "format", "api_managed", "status"],
         "additionalProperties": false
       },
+      "MembershipSource": {
+        "type": "object",
+        "description": "An active or degraded source currently containing a requested exact name.",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/SourceHealth" }
+        },
+        "required": ["id", "name", "status"],
+        "additionalProperties": false
+      },
+      "MembershipMatches": {
+        "type": "object",
+        "description": "Current memberships only. Generation is process-local and must not be used as historical attribution.",
+        "properties": {
+          "generation": { "type": "integer", "minimum": 0 },
+          "sources": { "type": "array", "items": { "$ref": "#/components/schemas/MembershipSource" } },
+          "matches": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "domain": { "type": "string" },
+                "source_ids": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["domain", "source_ids"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["generation", "sources", "matches"],
+        "additionalProperties": false
+      },
+      "ListDomainPage": {
+        "type": "object",
+        "properties": {
+          "source_id": { "type": "string" },
+          "snapshot": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "enum": ["active", "saved"] },
+              "version": { "type": "string", "description": "Opaque content/publication version, not a source-definition fingerprint." },
+              "last_success_at_ms": { "type": ["integer", "null"] },
+              "domain_count": { "type": "integer", "minimum": 0, "description": "Total snapshot membership count, independent of filters." },
+              "active": { "type": "boolean", "description": "True only when this content is demonstrably the snapshot currently used by DNS." }
+            },
+            "required": ["kind", "version", "last_success_at_ms", "domain_count", "active"],
+            "additionalProperties": false
+          },
+          "items": { "type": "array", "maxItems": 100, "items": { "type": "string" } },
+          "next_cursor": { "type": ["string", "null"] }
+        },
+        "required": ["source_id", "snapshot", "items", "next_cursor"],
+        "additionalProperties": false
+      },
       "RecordInput": {
         "type": "object",
         "properties": {
@@ -5384,7 +5513,13 @@
           },
           "upstream_queried": {
             "const": false
-          }
+          },
+          "matching_sources": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/MembershipSource" },
+            "description": "Sources currently containing the name, regardless of policy overrides."
+          },
+          "membership_generation": { "type": "integer", "minimum": 0 }
         },
         "required": [
           "name",
@@ -5396,7 +5531,9 @@
           "explicit_allow",
           "imported_block",
           "local_record",
-          "upstream_queried"
+          "upstream_queried",
+          "matching_sources",
+          "membership_generation"
         ],
         "additionalProperties": false
       },

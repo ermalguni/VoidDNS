@@ -5,6 +5,7 @@ const parse = @import("parse.zig");
 const Index = @import("index.zig").Index;
 const Store = @import("../lists/store.zig").Store;
 const log = std.log.scoped(.blocklist);
+var volatile_version = std.atomic.Value(u32).init(1);
 
 /// Mutations run before serving, or under the caller's exclusive publication
 /// lock. Queries borrow immutable state and perform a single RAM hash lookup.
@@ -14,6 +15,7 @@ pub const Service = struct {
         snapshot: Index.Snapshot,
         health: Health,
         fingerprint: ?[64]u8 = null,
+        version: ?[32]u8 = null,
     };
 
     pub const Health = struct {
@@ -39,6 +41,7 @@ pub const Service = struct {
             snapshot: ?[][]const u8 = null,
             health: ?Health = null,
             fingerprint: ?[64]u8 = null,
+            version: ?[32]u8 = null,
         };
 
         allocator: std.mem.Allocator,
@@ -97,6 +100,7 @@ pub const Service = struct {
                         .snapshot = change.snapshot orelse old.snapshot,
                         .health = change.health orelse old.health,
                         .fingerprint = change.fingerprint,
+                        .version = if (change.snapshot != null) change.version else old.version,
                     };
                     if (change.snapshot != null) service.index.release(old.snapshot);
                     if (old.source.name) |name| self.allocator.free(name);
@@ -108,6 +112,7 @@ pub const Service = struct {
                         .snapshot = change.snapshot.?,
                         .health = change.health.?,
                         .fingerprint = change.fingerprint,
+                        .version = change.version,
                     });
                 }
             }
@@ -116,6 +121,7 @@ pub const Service = struct {
                 service.index.release(old.snapshot);
                 old.source.deinit(self.allocator);
             }
+            if (self.changed()) service.generation +%= 1;
             self.committed = true;
         }
     };
@@ -123,6 +129,7 @@ pub const Service = struct {
     allocator: std.mem.Allocator,
     sources: std.StringHashMapUnmanaged(Entry) = .empty,
     index: Index,
+    generation: u64 = 1,
     /// Borrowed; owned by the process and assigned before startup imports.
     store: ?*Store = null,
 
@@ -208,7 +215,8 @@ pub const Service = struct {
                 const loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, fingerprint_value);
                 change.names = loaded.names;
                 change.health = loaded.health;
-                change.snapshot = try self.allocator.alloc([]const u8, change.names.?.entries.count());
+                change.version = loaded.version;
+                change.snapshot = try Index.prepareSnapshot(self.allocator, &change.names.?);
                 plan.incoming_names = std.math.add(u32, plan.incoming_names, change.names.?.entries.count()) catch return error.OutOfMemory;
             }
             if (old == null) plan.additions = std.math.add(u32, plan.additions, 1) catch return error.OutOfMemory;
@@ -273,7 +281,8 @@ pub const Service = struct {
         errdefer owned.deinit(self.allocator);
         try self.sources.ensureUnusedCapacity(self.allocator, 1);
         const loaded = try self.load(io, owned, base_dir);
-        self.sources.putAssumeCapacityNoClobber(owned.id, .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint });
+        self.sources.putAssumeCapacityNoClobber(owned.id, .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint, .version = loaded.version });
+        self.generation +%= 1;
         self.report("added", owned, loaded.snapshot.len);
     }
 
@@ -289,7 +298,8 @@ pub const Service = struct {
         // Keep the hash table key allocation stable while replacing other fields.
         self.allocator.free(owned.id);
         owned.id = old.source.id;
-        entry.* = .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint };
+        entry.* = .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint, .version = loaded.version };
+        self.generation +%= 1;
         self.index.release(old.snapshot);
         if (old.source.name) |name| self.allocator.free(name);
         self.allocator.free(old.source.source.value);
@@ -304,6 +314,8 @@ pub const Service = struct {
         entry.snapshot = loaded.snapshot;
         entry.health = loaded.health;
         entry.fingerprint = loaded.fingerprint;
+        entry.version = loaded.version;
+        self.generation +%= 1;
         self.index.release(old);
         self.report("refreshed", entry.source, loaded.snapshot.len);
     }
@@ -320,10 +332,11 @@ pub const Service = struct {
         self.report("removed", entry.source, entry.snapshot.len);
         self.index.release(entry.snapshot);
         entry.source.deinit(self.allocator);
+        self.generation +%= 1;
     }
 
-    const Loaded = struct { names: parse.Names, health: Health };
-    const LoadedSnapshot = struct { snapshot: Index.Snapshot, health: Health, fingerprint: ?[64]u8 };
+    const Loaded = struct { names: parse.Names, health: Health, version: ?[32]u8 = null };
+    const LoadedSnapshot = struct { snapshot: Index.Snapshot, health: Health, fingerprint: ?[64]u8, version: ?[32]u8 };
 
     fn load(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !LoadedSnapshot {
         var transaction: ?Store.Transaction = if (self.store) |store| try store.begin() else null;
@@ -339,14 +352,17 @@ pub const Service = struct {
         const snapshot = try self.index.acquire(&loaded.names);
         errdefer self.index.release(snapshot);
         if (transaction) |*tx| try tx.commit();
-        return .{ .snapshot = snapshot, .health = loaded.health, .fingerprint = key };
+        return .{ .snapshot = snapshot, .health = loaded.health, .fingerprint = key, .version = loaded.version };
     }
 
     fn loadNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8, transaction: ?*Store.Transaction, key: ?[64]u8) !Loaded {
         if (!source.enabled) return .{ .names = .{ .allocator = self.allocator }, .health = .{ .state = .disabled } };
         const tx = transaction orelse {
             const names = try self.fetchNames(io, source, base_dir);
-            return .{ .names = names, .health = .{ .state = .active, .domain_count = names.entries.count(), .last_success_at_ms = std.Io.Clock.real.now(io).toMilliseconds() } };
+            const at_ms = std.Io.Clock.real.now(io).toMilliseconds();
+            var version: [32]u8 = undefined;
+            _ = try std.fmt.bufPrint(&version, "{x:0>16}{x:0>16}", .{ @as(u64, @intCast(@max(0, at_ms))), @as(u64, volatile_version.fetchAdd(1, .monotonic)) });
+            return .{ .names = names, .health = .{ .state = .active, .domain_count = names.entries.count(), .last_success_at_ms = at_ms }, .version = version };
         };
         var failure: ?anyerror = null;
         var fetched: ?parse.Names = self.fetchNames(io, source, base_dir) catch |err| blk: {
@@ -365,7 +381,7 @@ pub const Service = struct {
             fetched = null;
         }
         if (try tx.load(self.allocator, source.id, &fingerprint_value)) |saved| {
-            return .{ .names = saved.names, .health = .{
+            return .{ .names = saved.names, .version = saved.version, .health = .{
                 .state = if (failure != null) .degraded else .active,
                 .last_error = if (failure) |err| @errorName(err) else null,
                 .last_success_at_ms = saved.last_success_at_ms,

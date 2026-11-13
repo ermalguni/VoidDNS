@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import quote
 
 BINARY = (Path(sys.argv[1]) if len(sys.argv) > 1 else Path("zig-out/bin/VoidDNS")).resolve()
 
@@ -46,9 +47,9 @@ def run():
         database, lists = base / "history.sqlite3", base / "lists.sqlite3"
         proc = None
 
-        def api(path, method="GET", body=None, etag=None):
+        def api(path, method="GET", body=None, etag=None, authenticated=True):
             conn = http.client.HTTPConnection("127.0.0.1", api_port, timeout=5)
-            headers = {"X-API-Key": "lists-integration-key"}
+            headers = {"X-API-Key": "lists-integration-key"} if authenticated else {}
             if etag:
                 headers["If-Match"] = etag
             if body is not None:
@@ -109,24 +110,139 @@ def run():
             assert status == 200, result
             return result["imported_block"]
 
+        def browse(id="first", query=""):
+            status, _, result = api("/blocklists/" + id + "/domains" + ("?" + query if query else ""))
+            assert status == 200, result
+            return result
+
+        def matches(*names):
+            status, _, result = api("/blocklists/matches", "POST", {"domains": list(names)})
+            assert status == 200, result
+            return result
+
         try:
             start()
             assert source("first")["status"]["state"] == "active"
             assert source("missing")["status"]["state"] == "unavailable"
             assert blocked("first.test") and blocked("common.test")
             assert json.loads(config.read_text())["blocks"]["lists"][2].get("enabled", True)
+            assert api("/blocklists/first/domains", authenticated=False)[0] == 401
+            assert api("/blocklists/matches", "POST", {"domains": []}, authenticated=False)[0] == 401
+            page = browse(query="limit=1")
+            assert page["items"] == ["common.test"] and page["next_cursor"]
+            assert page["snapshot"]["kind"] == "active" and page["snapshot"]["active"]
+            assert browse(query="limit=1&after=" + quote(page["next_cursor"], safe=""))["items"] == ["first.test"]
+            assert browse(query="domain=FIRST.test.")["items"] == ["first.test"]
+            assert browse(query="prefix=COM")["items"] == ["common.test"]
+            assert browse(query="prefix=FIRST.")["items"] == ["first.test"]
+            assert browse(query="prefix=first-")["items"] == []
+            assert browse(query="domain=absent.test")["items"] == []
+            assert browse(query="snapshot=saved")["snapshot"]["active"]
+            membership = matches("COMMON.test.", "common.test", "absent.test")
+            assert [s["id"] for s in membership["sources"]] == ["first", "second"]
+            assert membership["matches"] == [
+                {"domain": "common.test", "source_ids": ["first", "second"]},
+                {"domain": "absent.test", "source_ids": []},
+            ]
+            assert matches()["matches"] == [] and matches()["sources"] == []
+            assert len(matches(*(["COMMON.test."] * 100))["matches"]) == 1
+            with sqlite3.connect(lists) as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("UPDATE lists SET domain_count=999 WHERE id='first'")
+                # The HTTP reader must not use the writer connection or mutex.
+                assert browse(query="snapshot=saved")["snapshot"]["domain_count"] == 2
+                assert blocked("first.test")
+                db.rollback()
+            policy = api("/policy/check?name=COMMON.test.")[2]
+            assert [s["id"] for s in policy["matching_sources"]] == ["first", "second"]
+            assert policy["membership_generation"] == membership["generation"]
+            for query in ("limit=0", "limit=101", "limit=-1", "limit=+1", "limit=1&limit=2", "domain=a.test&prefix=a", "domain=*.test", "prefix=a..", "prefix=%C3%A9", "prefix=", "snapshot=other"):
+                assert api("/blocklists/first/domains?" + query)[0] == 400, query
+            assert api("/blocklists/matches", "POST", {"domains": ["a.test"] * 101})[0] == 400
+            assert api("/blocklists/matches", "POST", {"domains": ["*.test"]})[0] == 400
+            assert api("/blocklists/matches", "POST", {"domains": ["127.0.0.1"]})[0] == 400
+            assert api("/blocklists/matches", "POST", {"domains": [], "extra": True})[0] == 400
+            assert api("/blocklists/matches", "POST", {"domains": [123]})[0] == 400
+            assert api("/blocklists/matches", "POST", {"domains": ["a" * 64 + ".test"]})[0] == 400
+            for query in ("", "snapshot=saved"):
+                status, _, error = api("/blocklists/missing/domains?" + query)
+                assert status == 404 and error["error"]["message"] == "SnapshotUnavailable"
+            for query in ("snapshot=saved", "prefix=first"):
+                assert api("/blocklists/first/domains?" + query + "&after=" + quote(page["next_cursor"], safe=""))[0] == 409
+            assert api("/blocklists/second/domains?after=" + quote(page["next_cursor"], safe=""))[0] == 409
+            first.write_text("common.test\nfirst.test\nnew.test\n")
+            mutate("/blocklists/first/refresh")
+            assert api("/blocklists/first/domains?after=" + quote(page["next_cursor"], safe=""))[0] == 409
+            assert matches("common.test")["generation"] > membership["generation"]
+            # A durable commit can precede publication. Saved reads must not
+            # claim this content is the active snapshot used by DNS.
+            with sqlite3.connect(lists) as db:
+                db.execute("DELETE FROM list_domains WHERE list_id='first'")
+                db.execute("INSERT INTO domains(name) VALUES('saved-only.test')")
+                db.execute("INSERT INTO list_domains(list_id,domain_id,name) SELECT 'first',id,name FROM domains WHERE name='saved-only.test'")
+                db.execute("UPDATE lists SET version=lower(hex(randomblob(16))),domain_count=1 WHERE id='first'")
+            saved_page = browse(query="snapshot=saved")
+            assert saved_page["items"] == ["saved-only.test"] and not saved_page["snapshot"]["active"]
+            assert browse(query="snapshot=active")["items"] == ["common.test", "first.test", "new.test"]
+            assert matches("saved-only.test")["matches"][0]["source_ids"] == []
+            assert blocked("first.test")
+            mutate("/blocklists/first/refresh")
+            # Disabled definitions retain compatible saved data, never active membership.
+            document["blocks"]["lists"][0]["enabled"] = False
+            document["allows"] = {"domains": ["common.test"]}
+            config.write_text(json.dumps(document))
+            mutate("/config/reload")
+            disabled = browse()
+            assert disabled["snapshot"]["kind"] == "saved" and not disabled["snapshot"]["active"]
+            assert disabled["items"] == ["common.test", "first.test", "new.test"]
+            assert api("/blocklists/first/domains?snapshot=active")[0] == 404
+            policy = api("/policy/check?name=common.test")[2]
+            assert policy["reason"] == "explicit_allow" and policy["imported_block"]
+            assert [s["id"] for s in policy["matching_sources"]] == ["second"]
+            assert matches("common.test")["matches"][0]["source_ids"] == ["second"]
+            document["blocks"]["lists"][0]["enabled"] = True
+            del document["allows"]
+            config.write_text(json.dumps(document))
+            mutate("/config/reload")
+            document["blocks"]["lists"].append({"id": "matches", "enabled": False, "source": {"kind": "url", "value": "https://example.test/domains.txt"}, "format": "domains"})
+            config.write_text(json.dumps(document))
+            mutate("/config/reload")
+            assert source("matches")["status"]["state"] == "disabled"
+            assert api("/blocklists/matches", "PUT", {})[0] == 428
+            mutate("/blocklists/matches", "DELETE")
+            assert matches("common.test")["matches"][0]["source_ids"] == ["first", "second"]
             stop()
+            # Downgrade the durable fixture to the old schema, then restart with
+            # missing sources: migration must retain the last successful content.
+            with sqlite3.connect(lists) as db:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("ALTER TABLE lists RENAME TO lists_v2")
+                db.execute("CREATE TABLE lists(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind='block'),fingerprint TEXT NOT NULL,last_success_at_ms INTEGER NOT NULL)")
+                db.execute("INSERT INTO lists SELECT id,kind,fingerprint,last_success_at_ms FROM lists_v2")
+                db.execute("ALTER TABLE list_domains RENAME TO list_domains_v2")
+                db.execute("CREATE TABLE list_domains(list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,domain_id INTEGER NOT NULL REFERENCES domains(id),PRIMARY KEY(list_id,domain_id)) WITHOUT ROWID")
+                db.execute("INSERT INTO list_domains SELECT list_id,domain_id FROM list_domains_v2")
+                db.execute("DROP TABLE list_domains_v2")
+                db.execute("DROP TABLE lists_v2")
+                db.execute("PRAGMA user_version=1")
             first.unlink()
             second.unlink()
             start()
+            with sqlite3.connect(lists) as db:
+                assert db.execute("PRAGMA user_version").fetchone()[0] == 2
             health = source("first")["status"]
-            assert health["state"] == "degraded" and health["domain_count"] == 2 and health["last_error"]
+            assert health["state"] == "degraded" and health["domain_count"] == 3 and health["last_error"]
             assert blocked("first.test") and blocked("second.test")
+            degraded = matches("common.test")
+            assert [s["status"]["state"] for s in degraded["sources"]] == ["degraded", "degraded"]
+            assert browse()["snapshot"]["active"] and browse(query="snapshot=saved")["snapshot"]["active"]
             mutate("/blocklists/refresh")
             assert blocked("common.test")
             first.write_text("")
             mutate("/blocklists/first/refresh")
             assert source("first")["status"]["domain_count"] == 0
+            assert browse()["items"] == [] and browse()["snapshot"]["domain_count"] == 0
+            assert matches("first.test")["matches"][0]["source_ids"] == []
             assert not imported("first.test") and blocked("common.test")
             mutate("/blocklists/second", "DELETE")
             assert not imported("common.test")
@@ -141,6 +257,7 @@ def run():
             start()
             assert source("first")["status"]["state"] == "unavailable"
             assert not imported("restored.test")
+            assert api("/blocklists/first/domains?snapshot=saved")[0] == 404
             stop()
             with sqlite3.connect(lists) as db:
                 assert db.execute("SELECT count(*) FROM lists WHERE id='second'").fetchone()[0] == 0
