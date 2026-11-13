@@ -1181,11 +1181,20 @@ telemetry does not advance the configuration revision. Metrics reads use a
 separate serialized connection outside DNS locks and a two-second SQL execution
 deadline. See the embedded OpenAPI contract for response schemas.
 
-The Overview page provides a stacked volume chart, totals, active clients, and
-blocked domains. Clients supports details and inline naming. Request history
-provides filters, expandable details, and pagination. Select a chart bar to inspect
-that interval. Metrics refresh every ten seconds while visible; history stays
-still until refreshed. Chart data is also available as a table.
+The Overview page combines listener readiness with one time-range selector and
+Refresh action for activity, telemetry health, runtime, and cache data. Its compact
+statistics strip links to matching request history, including blocked counts and
+percentages, cache hit rate, active clients, and errors. The stacked activity chart
+has labeled axes, keyboard-accessible outcome tooltips, and an alternative data
+table. Select a bar to inspect that exact interval. Top clients, queried domains,
+and blocked domains show up to five rows; drilldowns preserve the selected window.
+Listener failures, telemetry loss, and saved/active disagreements appear above the
+statistics. Routine runtime diagnostics and cache occupancy are expandable; cache
+clearing still requires confirmation. Layouts support narrow screens and both themes.
+Previous activity remains visible and marked when a telemetry refresh fails.
+Metrics refresh every ten seconds while visible. Clients supports details and inline
+naming; request history provides filters, expandable details, and pagination, and
+stays still until refreshed.
 
 Blocked percentage = blocked / total. Cache hit percentage =
 cached / (cached + forwarded). Empty denominators display zero. Active clients

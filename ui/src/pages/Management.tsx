@@ -80,11 +80,16 @@ export function OverviewPage() {
     }
   }
   return <Stack gap="xl">
-    <PageHeading title="Overview" description="The current listener, configuration agreement, and upstream response cache." />
-    <MetricsOverview />
-    <Group justify="space-between"><Text size="sm" c="dimmed">Refreshes every 10 seconds while this page is open.</Text><Button variant="default" loading={status.isFetching || cache.isFetching} onClick={() => { void status.refetch(); void cache.refetch(); }}>Refresh status</Button></Group>
-    <ErrorNotice error={status.error || cache.error || error} />
-    {cleared && <Alert color="teal" title="Cache cleared">All upstream response-cache entries were cleared. Policies and local records were not changed.</Alert>}
+    <MetricsOverview runtime={{ fetching: status.isFetching || cache.isFetching,
+      refresh: () => Promise.all([status.refetch(), cache.refetch()]),
+      listener: status.data ? <Group gap="xs"><Badge color={status.data.data.dns.ready ? 'teal' : 'orange'} variant="light">{status.data.data.dns.ready ? 'Listener ready' : 'Listener not ready'}</Badge><Text size="sm" c="dimmed">{status.data.data.dns.listen}</Text>{status.isError ? <Text size="xs" c="orange">Previous status</Text> : null}</Group> : <Text size="sm" c="dimmed">{status.isPending ? 'Checking listener…' : 'Listener status unavailable'}</Text>,
+      notices: <>
+        <ErrorNotice error={status.error || cache.error || error} />
+        {status.data && !status.data.data.dns.ready ? <Alert color="red" title="DNS listener not ready">The listener is not ready to accept DNS requests. Inspect the service before changing filtering rules.</Alert> : null}
+        {status.data?.data.saved_matches_active === false ? <Alert color="orange" title="Saved and active configuration differ">An operation may have saved a candidate that did not activate. The configuration editor shows the active document, not the file on disk. Inspect before making another change.</Alert> : null}
+        {cleared ? <Alert color="teal" title="Cache cleared">All upstream response-cache entries were cleared. Policies and local records were not changed.</Alert> : null}
+      </> }} />
+    <details className="runtime-details"><summary>Runtime &amp; cache details{cache.data ? ` · ${integerToken(cache.data.raw, 'occupied_slots', cache.data.data.occupied_slots)} / ${integerToken(cache.data.raw, 'capacity', cache.data.data.capacity)} slots occupied` : ''}</summary>
     <section aria-labelledby="listener-heading">
       <Title id="listener-heading" order={2} size="h3" mb="md">Listener & runtime</Title>
       {status.isPending ? <Loader size="sm" aria-label="Loading status" /> : status.data ? <>
@@ -96,7 +101,7 @@ export function OverviewPage() {
           <Table.Tr><Table.Th>Saved / active agreement</Table.Th><Table.Td>{status.data.data.saved_matches_active === null ? 'Unknown while an operation is running' : status.data.data.saved_matches_active ? 'Last known to match' : 'Saved and active configuration differ'}</Table.Td></Table.Tr>
         </Table.Tbody></Table>
         <Text size="sm" c="dimmed" mt="sm">Readiness describes the DNS listener, not upstream health. Agreement is last known by this process; external file edits are not detected.</Text>
-        {status.data.data.saved_matches_active === false && <Alert color="orange" mt="md" title="Inspect before making another change">An operation may have saved a candidate that did not activate. The configuration editor shows the active document, not the contents of the file on disk.</Alert>}
+        {status.isError ? <Text c="orange" size="sm">Previous runtime data. Refresh to retry.</Text> : null}
       </> : null}
     </section>
     <Divider />
@@ -111,6 +116,7 @@ export function OverviewPage() {
       </Table.Tbody></Table> : null}
       <Text size="sm" c="dimmed" mt="sm">Occupied slots can include expired entries awaiting reclamation. They are not hit/miss statistics.</Text>
     </section>
+    </details>
     <Modal opened={confirmation !== null} onClose={() => { if (!writer.busy) setConfirmation(null); }} title="Clear all upstream cache entries?" closeOnClickOutside={!writer.busy} closeOnEscape={!writer.busy} withCloseButton={!writer.busy}>
       <Stack><Text>This immediately clears cached upstream responses. It does not remove explicit rules, imported blocklists, or local records.</Text><Text size="sm">Viewed revision: <Code>{confirmation?.etag}</Code>. Occupied slots: {confirmation ? integerToken(confirmation.raw, 'occupied_slots', confirmation.data.occupied_slots) : '—'}.</Text><Group justify="flex-end"><Button variant="default" disabled={writer.busy} onClick={() => setConfirmation(null)}>Cancel</Button><Button color="red" loading={writer.busy} onClick={() => void clearCache()}>Clear cache</Button></Group></Stack>
     </Modal>

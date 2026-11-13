@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, Group, Select, Skeleton, Stack, Table, Text, TextInput, Title } from '@mantine/core';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Alert, Badge, Button, Checkbox, Group, Select, Skeleton, Stack, Table, Text, TextInput, Title, Tooltip } from '@mantine/core';
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useApi, type Schema } from '../api';
 import { ErrorNotice } from '../components';
@@ -67,7 +67,13 @@ function WindowControls({ window: w, refresh }: { window: ReturnType<typeof useW
 function useMetric<T>(path: string, query: URLSearchParams) {
   const api = useApi();
   const url = `${path}?${query}`;
-  return useQuery({ queryKey: [url], queryFn: ({ signal }) => api.read<Envelope<T>>(url, signal), placeholderData: previous => previous });
+  const result = useQuery({ queryKey: [url], queryFn: ({ signal }) => api.read<Envelope<T>>(url, signal), placeholderData: previous => previous });
+  const previous = useRef(result.data);
+  useEffect(() => {
+    if (result.data && !result.isPlaceholderData) previous.current = result.data;
+  }, [result.data, result.isPlaceholderData]);
+  // Each rolling window has a new query key; placeholderData disappears on error.
+  return { ...result, data: result.data ?? (result.isError ? previous.current : undefined) };
 }
 
 function HealthNotice() {
@@ -87,47 +93,97 @@ function VolumeChart({ response, query }: { response: Envelope<Bucket[]>; query:
   const byTime = new Map(response.data.map(row => [row.start_ms, row]));
   for (let time = response.from_ms; time < response.to_ms; time += response.interval_ms) rows.push(byTime.get(time) ?? { ...emptyCounts, start_ms: time });
   const max = Math.max(1, ...rows.map(row => row.total));
-  return <section aria-labelledby="volume-heading"><Title id="volume-heading" order={3}>Request volume</Title>
-    <Group gap="md" my="sm">{outcomes.map(outcome => <Badge key={outcome} color={colors[outcome]} variant="light">{outcome}</Badge>)}</Group>
-    <Text size="xs" c="dimmed">Requests per {response.interval_ms / 60000} minutes · vertical scale 0–{number.format(max)} · select a bar to inspect requests</Text>
-    <div className="metrics-chart" aria-label="Recorded requests over time">
-      {rows.map(row => {
-        const target = new URLSearchParams(query); target.set('from', String(row.start_ms)); target.set('to', String(Math.min(row.start_ms + response.interval_ms, response.to_ms)));
-        const label = `${date(row.start_ms)}: ${row.total} requests, ${outcomes.map(outcome => `${row[outcome]} ${outcome}`).join(', ')}`;
-        return <Link key={row.start_ms} to={`/requests?${target}`} className="metrics-bar" title={label} aria-label={label}>
-          {outcomes.map(outcome => <span key={outcome} className={`metric-${outcome}`} style={{ height: `${100 * row[outcome] / max}%` }} />)}
-        </Link>;
-      })}
+  const scale = Math.max(4, Math.ceil(max / 4) * 4);
+  return <section className="activity-panel" aria-labelledby="volume-heading">
+    <Group justify="space-between" mb="sm"><Title id="volume-heading" order={2} size="h3">Request activity</Title><Text size="xs" c="dimmed">Requests per {response.interval_ms / 60000} minutes</Text></Group>
+    <div className="chart-layout">
+      <div className="chart-scale" aria-hidden="true">{[4, 3, 2, 1, 0].map(step => <span key={step}>{number.format(scale * step / 4)}</span>)}</div>
+      <div className="metrics-chart" aria-label="Recorded requests over time">
+        <div className="chart-grid" aria-hidden="true">{[0, 1, 2, 3, 4].map(step => <span key={step} />)}</div>
+        {rows.map(row => {
+          const target = new URLSearchParams(query); target.set('from', String(row.start_ms)); target.set('to', String(Math.min(row.start_ms + response.interval_ms, response.to_ms)));
+          const label = `${date(row.start_ms)}: ${number.format(row.total)} requests, ${outcomes.map(outcome => `${number.format(row[outcome])} ${outcome}`).join(', ')}`;
+          return <Tooltip key={row.start_ms} events={{ hover: true, focus: true, touch: true }} multiline w={230} withArrow label={<div><Text size="xs" fw={600}>{date(row.start_ms)}</Text><Text size="xs">{number.format(row.total)} requests</Text>{outcomes.map(outcome => <Text size="xs" key={outcome}>{outcome}: {number.format(row[outcome])}</Text>)}</div>}>
+            <Link to={`/requests?${target}`} className="metrics-bar" aria-label={label}>
+              {outcomes.map(outcome => <span key={outcome} className={`metric-${outcome}`} style={{ height: `${100 * row[outcome] / scale}%` }} />)}
+            </Link>
+          </Tooltip>;
+        })}
+      </div>
+      <div className="chart-times" aria-hidden="true">{[0, 1, 2, 3, 4].map(step => <span key={step}>{new Date(response.from_ms + (response.to_ms - response.from_ms) * step / 4).toLocaleString(undefined, response.to_ms - response.from_ms > 86400000 ? { month: 'short', day: 'numeric', hour: 'numeric' } : { hour: '2-digit', minute: '2-digit' })}</span>)}</div>
     </div>
-    <Group justify="space-between"><Text size="xs">{date(response.from_ms)}</Text><Text size="xs">{date(response.to_ms)}</Text></Group>
+    <Group gap="md" mt="md">{outcomes.map(outcome => <Text key={outcome} size="xs" tt="capitalize"><span className={`legend-dot metric-${outcome}`} />{outcome}</Text>)}</Group>
+    <Text size="xs" c="dimmed" mt="xs">Select a bar to inspect requests. Errors can overlap any outcome.</Text>
     <details><summary>View chart data as a table</summary><Table.ScrollContainer minWidth={600}><Table><Table.Thead><Table.Tr><Table.Th>Time</Table.Th>{outcomes.map(outcome => <Table.Th key={outcome}>{outcome}</Table.Th>)}</Table.Tr></Table.Thead><Table.Tbody>{rows.map(row => <Table.Tr key={row.start_ms}><Table.Td>{date(row.start_ms)}</Table.Td>{outcomes.map(outcome => <Table.Td key={outcome}>{number.format(row[outcome])}</Table.Td>)}</Table.Tr>)}</Table.Tbody></Table></Table.ScrollContainer></details>
   </section>;
 }
 
-export function MetricsOverview() {
+export function MetricsOverview({ runtime }: { runtime?: {
+  listener: ReactNode; notices: ReactNode; refresh(): Promise<unknown>; fetching: boolean;
+} }) {
   const w = useWindow(true);
+  const queryClient = useQueryClient();
+  const healthFetching = useIsFetching({ queryKey: ['/metrics/health'] }) > 0;
   const summary = useMetric<Summary>('/metrics/summary', w.query);
   const series = useMetric<Bucket[]>('/metrics/timeseries', w.query);
-  const clients = useMetric<Client[]>('/metrics/clients', w.query);
-  const domainsQuery = new URLSearchParams(w.query); domainsQuery.set('resolution', 'blocked'); domainsQuery.set('limit', '10');
+  const rankedQuery = new URLSearchParams(w.query); rankedQuery.set('limit', '5');
+  const clients = useMetric<Client[]>('/metrics/clients', rankedQuery);
+  const queriedDomains = useMetric<(Counts & { domain: string })[]>('/metrics/domains', rankedQuery);
+  const domainsQuery = new URLSearchParams(rankedQuery); domainsQuery.set('resolution', 'blocked');
   const domains = useMetric<(Counts & { domain: string })[]>('/metrics/domains', domainsQuery);
-  const error = summary.error || series.error || clients.error || domains.error;
+  const queries = [summary, series, clients, queriedDomains, domains];
+  const fetching = runtime?.fetching || healthFetching || queries.some(query => query.isFetching);
+  const error = queries.find(query => query.error)?.error;
   const s = summary.data?.data.data;
+  function history(filters: Record<string, string> = {}) {
+    const target = new URLSearchParams(w.query);
+    for (const [key, value] of Object.entries(filters)) target.set(key, value);
+    return `/requests?${target}`;
+  }
+  const observed = queries.flatMap(query => query.data ? [query.data.data.observed_at_ms] : []);
+  const stale = queries.some(query => query.isError && query.data || query.isPlaceholderData);
+  function domainTable(title: string, response: typeof domains, blocked: boolean) {
+    return <section className="ranking-section"><Title order={2} size="h3" mb="sm">{title}</Title>
+      {response.isPending ? <Skeleton height={180} /> : response.data ? <>
+        <Table className="metrics-data"><Table.Thead><Table.Tr><Table.Th>Domain</Table.Th><Table.Th ta="right">{blocked ? 'Blocked' : 'Requests'}</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>{response.data.data.data.map(row => <Table.Tr key={row.domain}><Table.Td><Link to={history({ domain: row.domain, ...(blocked ? { resolution: 'blocked' } : {}) })}>{row.domain}</Link></Table.Td><Table.Td ta="right">{number.format(row.total)}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
+        {response.data.data.data.length === 0 ? <Text size="sm" c="dimmed" my="md">No {blocked ? 'blocked ' : ''}requests in this period.</Text> : null}
+      </> : <Text size="sm" c="dimmed">Domain statistics unavailable.</Text>}
+      <Link className="ranking-more" to={history(blocked ? { resolution: 'blocked' } : {})}>View {blocked ? 'blocked ' : ''}requests →</Link>
+    </section>;
+  }
   return <Stack gap="lg">
-    <Group justify="space-between"><Title order={2}>DNS activity</Title><Text size="sm" c="dimmed">Recorded history · 7-day retention</Text></Group>
-    <WindowControls window={w} refresh={w.refresh} />
-    <HealthNotice /><ErrorNotice error={error} />
-    {error && summary.data ? <Text c="orange" role="status">Showing previous data. Last observed: {date(summary.data.data.observed_at_ms)}.</Text> : null}
+    {runtime ? <div className="overview-toolbar"><div><Title order={1}>Overview</Title><div className="overview-listener">{runtime.listener}</div></div>
+      <Stack gap={6} align="end"><Group align="end" gap="sm"><Select aria-label="Time range" value={w.hours} data={[{ value: '1', label: 'Last hour' }, { value: '24', label: 'Last 24 hours' }, { value: '168', label: 'Last 7 days' }]} onChange={value => w.set('hours', value)} w={170} />
+        <Button variant="default" loading={fetching} onClick={() => { w.refresh(); void runtime.refresh(); void queryClient.refetchQueries({ queryKey: ['/metrics/health'] }); }}>Refresh</Button></Group>
+        <Text size="xs" c={stale ? 'orange' : 'dimmed'} role="status">{stale ? 'Previous data · ' : ''}{fetching ? 'Updating…' : observed.length ? `Updated ${new Date(Math.min(...observed)).toLocaleTimeString()}` : 'Waiting for activity'} · Auto-refresh 10s</Text>
+      </Stack>
+    </div> : <><Title order={2}>Client DNS activity</Title><WindowControls window={w} refresh={w.refresh} /></>}
+    {runtime?.notices}<HealthNotice /><ErrorNotice error={error} />
+    {runtime && (w.params.get('client_id') || w.params.get('from')) ? <Group><Text size="sm">Filtered view{w.params.get('client_id') ? ` · Client #${w.params.get('client_id')}` : ''}{w.params.get('from') ? ` · ${date(Number(w.params.get('from')))} – ${date(Number(w.params.get('to')))}` : ''}</Text><Button size="xs" variant="subtle" component={Link} to={`/?hours=${w.hours}`}>Reset filters</Button></Group> : null}
     {s ? <dl className="metrics-summary">
-      <div><dt>Requests</dt><dd>{number.format(s.total)}</dd></div><div><dt>Blocked</dt><dd>{percent(s.blocked_percentage)}</dd></div>
-      <div><dt>Cache hit rate</dt><dd title="Cached ÷ (cached + forwarded)">{percent(s.cache_hit_percentage)}</dd></div>
-      <div><dt>Active clients</dt><dd>{s.active_clients}</dd></div><div><dt>Errors</dt><dd>{s.errors}</dd></div>
-    </dl> : <Skeleton height={60} />}
-    {series.data ? <VolumeChart response={series.data.data} query={w.query} /> : <Skeleton height={220} />}
+      <div><dt>Requests</dt><dd><Link to={history()}>{number.format(s.total)}</Link><Text size="xs" c="dimmed">Recorded in this period</Text></dd></div>
+      <div><dt>Blocked</dt><dd><Link to={history({ resolution: 'blocked' })}>{number.format(s.blocked)}</Link> <small>{percent(s.blocked_percentage)}</small><Text size="xs" c="dimmed">Of all recorded requests</Text></dd></div>
+      <div><dt>Cache hit rate</dt><dd><Tooltip label="Cached ÷ (cached + forwarded)" events={{ hover: true, focus: true, touch: true }}><Link to={history({ resolution: 'cached' })}>{percent(s.cache_hit_percentage)}</Link></Tooltip><Text size="xs" c="dimmed">Cached ÷ (cached + forwarded)</Text></dd></div>
+      <div><dt>Active clients</dt><dd><Link to={`/clients?${w.query}`}>{number.format(s.active_clients)}</Link><Text size="xs" c="dimmed">With matching requests</Text></dd></div>
+      <div><dt>Errors</dt><dd><Link to={history({ errors: 'true' })}>{number.format(s.errors)}</Link><Text size="xs" c="dimmed">May overlap any outcome</Text></dd></div>
+    </dl> : summary.isPending ? <Skeleton height={110} /> : null}
+    {series.data ? <VolumeChart response={series.data.data} query={w.query} /> : series.isPending ? <Skeleton height={300} /> : <Text c="dimmed">Request activity unavailable.</Text>}
     {s?.total === 0 ? <Text c="dimmed">No recorded requests in this period. Send a DNS query to this server to begin collecting history.</Text> : null}
-    <div className="metrics-tables"><section><Title order={3} mb="sm">Most active clients</Title>
-      <Table><Table.Thead><Table.Tr><Table.Th>Client</Table.Th><Table.Th>Requests</Table.Th><Table.Th>Blocked</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{clients.data?.data.data.slice(0, 10).map(client => <Table.Tr key={client.id}><Table.Td><Link to={`/clients?client_id=${client.id}&hours=${w.hours}`}>{client.name ?? client.ip_address}</Link></Table.Td><Table.Td>{number.format(client.total)}</Table.Td><Table.Td>{percent(client.total ? 100 * client.blocked / client.total : 0)}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
-    </section><section><Title order={3} mb="sm">Most blocked domains</Title><Table><Table.Thead><Table.Tr><Table.Th>Domain</Table.Th><Table.Th>Requests</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{domains.data?.data.data.map(row => { const target = new URLSearchParams(w.query); target.set('domain', row.domain); target.set('resolution', 'blocked'); return <Table.Tr key={row.domain}><Table.Td><Link to={`/requests?${target}`}>{row.domain}</Link></Table.Td><Table.Td>{number.format(row.total)}</Table.Td></Table.Tr>; })}</Table.Tbody></Table></section></div>
+    <div className="metrics-tables">
+      <section className="ranking-section"><Title order={2} size="h3" mb="sm">Top clients</Title>
+        {clients.isPending ? <Skeleton height={180} /> : clients.data ? <>
+          <Table className="metrics-data"><Table.Thead><Table.Tr><Table.Th>Client</Table.Th><Table.Th ta="right">Requests</Table.Th><Table.Th ta="right">Blocked</Table.Th></Table.Tr></Table.Thead><Table.Tbody>
+            {clients.data.data.data.slice(0, 5).map(client => <Table.Tr key={client.id}><Table.Td><Link to={history({ client_id: String(client.id) })}>{client.name || client.ip_address}</Link>{client.name ? <Text size="xs" c="dimmed">{client.ip_address}</Text> : null}</Table.Td><Table.Td ta="right">{number.format(client.total)}</Table.Td><Table.Td ta="right">{percent(client.total ? 100 * client.blocked / client.total : 0)}</Table.Td></Table.Tr>)}
+          </Table.Tbody></Table>
+          {clients.data.data.data.length === 0 ? <Text size="sm" c="dimmed" my="md">No active clients in this period.</Text> : null}
+        </> : <Text size="sm" c="dimmed">Client statistics unavailable.</Text>}
+        <Link className="ranking-more" to={`/clients?${w.query}`}>View clients →</Link>
+      </section>
+      {domainTable('Top queried domains', queriedDomains, false)}
+      {domainTable('Top blocked domains', domains, true)}
+    </div>
+    <Text size="xs" c="dimmed">Recorded history · Seven-day retention · Counts exclude unrecorded or dropped events.</Text>
   </Stack>;
 }
 
