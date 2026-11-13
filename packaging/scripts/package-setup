@@ -11,9 +11,17 @@ if [ ! -e /etc/voiddns ]; then
     install -d -m 0750 -o voiddns -g voiddns /etc/voiddns
 fi
 for file in voiddns.json blocked-domains.txt; do
-    if [ ! -e "/etc/voiddns/$file" ] && [ ! -L "/etc/voiddns/$file" ]; then
-        install -m 0600 -o voiddns -g voiddns \
-            "/usr/share/doc/voiddns/examples/$file" "/etc/voiddns/$file"
+    destination="/etc/voiddns/$file"
+    if [ "$file" = voiddns.json ] &&
+        { [ -e "$destination" ] || [ -L "$destination" ]; }; then
+        destination="$destination.new"
+    elif [ -e "$destination" ] || [ -L "$destination" ]; then
+        continue
+    fi
+    install -T -m 0600 -o voiddns -g voiddns \
+        "/usr/share/doc/voiddns/examples/$file" "$destination"
+    if [ "$destination" = /etc/voiddns/voiddns.json.new ]; then
+        printf 'VoidDNS: Existing configuration preserved. New configuration installed at %s; review and merge changes manually.\n' "$destination"
     fi
 done
 if [ ! -e /etc/voiddns/api.key ] && [ ! -L /etc/voiddns/api.key ]; then
