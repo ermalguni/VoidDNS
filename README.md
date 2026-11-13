@@ -142,15 +142,20 @@ downloads. Installation also copies `voiddns.json` and `blocked-domains.txt` int
 `/etc/voiddns` and generates a unique 256-bit hexadecimal API key in
 `/etc/voiddns/api.key` (no trailing newline). The directory is mode `0750`; new
 configuration, blocklist, and key files are mode `0600`, owned by `voiddns`.
-Existing files, including credentials, are never overwritten on installation
-or upgrade. The public development key in `examples/api.key` is not installed.
+Existing configuration, blocklist, and credentials are preserved on installation,
+reinstallation, and upgrade. If `/etc/voiddns/voiddns.json` already exists, the
+packaged configuration is written to `/etc/voiddns/voiddns.json.new` instead,
+replacing any previous `.new` copy. The installer prints this path and asks you
+to review and merge changes manually; the service continues using `voiddns.json`.
+The public development key in `examples/api.key` is not installed.
 
 The service runs as `User=voiddns`, with working and configuration directory
 `/etc/voiddns`, and only the DNS bind capability (`CAP_NET_BIND_SERVICE`).
 Installation enables and starts it when systemd is running. The example binds
-DNS to `127.0.0.1:53` and the UI/API to `127.0.0.1:8080`. Failed startup blocklist
-imports are logged and disabled in the configuration before startup continues.
-A port already in use or failure to save those changes can prevent startup.
+DNS to `127.0.0.1:53` and the UI/API to `127.0.0.1:8080`. Failed startup imports
+use compatible saved snapshots when available; otherwise sources remain enabled
+but unavailable. They are not automatically disabled or rewritten in JSON.
+A port already in use or database startup failure can prevent startup.
 
 Open `http://127.0.0.1:8080` and use the generated key to authenticate.
 To display it:
@@ -436,7 +441,7 @@ Every completed management operation advances its revision.
 | Record added, removed, addresses/TTL changed | Publish the new record collection, retaining unchanged name/address allocations |
 | Explicit allow/block changed | Add/remove only affected normalized names |
 | Enabled source added or enabled | Load only that source and add its memberships |
-| Source removed or disabled | Release only its memberships; disabling retains the definition, not its contents |
+| Source removed or disabled | Release its RAM memberships; disabling retains its durable snapshot, deleting removes its stored memberships |
 | Enabled source URL/path/format changed | Prepare and replace only that source's snapshot |
 | Source display name changed | Update metadata without source I/O |
 | Log level changed | Update the atomic threshold |
@@ -450,13 +455,17 @@ Every completed management operation advances its revision.
 snapshot even if its contents changed or the source is now unavailable. Use
 `refresh <source-id>` or `refresh-all` to import new contents. These commands use
 the active definitions, not unapplied edits in the configuration file. Refreshing
-a disabled source is a no-op; an unknown source ID is rejected. Refresh-all is
-all-or-nothing across enabled sources. Restart still loads every enabled source.
+a disabled source is a no-op; an unknown source ID is rejected. Refresh-all
+fetches every enabled source and publishes prepared memberships and health
+together. Each failed fetch uses a compatible saved snapshot, or leaves that
+source unavailable when none exists. Restart also fetches every enabled source
+before considering a saved fallback.
 
 Fetching, parsing, and staging happen while DNS continues serving. Every
-fallible reservation completes before publication; any invalid configuration,
-failed import, or allocation failure rejects the whole candidate. Main commits
-the prepared source/rule/record changes under the state publication mutex. DNS
+fallible reservation completes before publication; invalid configuration,
+allocation failure, or a storage failure rejects the whole candidate. Import
+failures become source health rather than silently disabling definitions.
+Main commits prepared source/rule/record changes under the state publication mutex. DNS
 holds that mutex only through policy lookup and local-answer construction, never
 through cache/upstream I/O. A query already past its policy check may finish with
 the preceding policy. Large source commits still take time proportional to their
@@ -587,10 +596,11 @@ refresh usage; measure those separately for the target machine.
 
 The example downloads its enabled URL sources at startup. Disabled sources are
 not downloaded. Additional feeds can overlap with HaGeZi and each other,
-increasing download time and RAM usage. Failed imports
-are logged and persistently disabled; upstream contents can change after validation.
-Re-enable a source explicitly after fixing it. Disable unwanted sources rather than
-assuming all Pi-hole lists are compatible. Matching remains exact for these feeds.
+increasing download time and RAM usage. Failed imports are logged and use a
+compatible saved snapshot, if available. Without one, the source stays enabled
+but unavailable, providing no imported blocking protection until a successful
+refresh or restart. Disable unwanted sources rather than assuming all Pi-hole
+lists are compatible. Matching remains exact for these feeds.
 Use an explicit refresh to update imported contents; an ordinary reload preserves
 snapshots whose source definitions have not changed. No automatic refresh scheduler
 is implemented.
@@ -692,35 +702,76 @@ the policy checks.
 
 ### Ownership, updates, and limits
 
-Before binding the listener, startup attempts every enabled list. Missing files,
-failed downloads, and malformed content are logged with source ID/name and error,
-without exposing source locations. Failed entries are retained with `enabled: false`
-in RAM and atomically saved to the configuration file; other lists continue loading,
-even if every import fails. Disabled lists provide no blocking protection and must
-be explicitly re-enabled after repair. Invalid configuration, allocation failure,
-cancellation, or failure to save the disabled entries still stops startup.
-Startup only rewrites the file when an enabled import fails; saves use the normal
-canonical formatting and private permissions described above.
-Definitions survive restarts in the configuration file; downloaded snapshots do not.
-Each restart fetches every enabled source. Reload retains unchanged snapshots,
-so unrelated record edits work even when an existing source is unavailable.
-The management HTTP API supports persistent CRUD and explicit refresh. No
-automatic refresh scheduler, file watcher, or peer synchronization is implemented.
+Before binding the listener, startup attempts every enabled list. Restart and
+explicit refresh are **fetch-first**: even when a saved snapshot exists, VoidDNS
+tries the configured URL or file before falling back. Missing files, failed
+downloads, and malformed content are logged with source ID/name and a safe error
+name, without exposing source locations. With the snapshot store configured,
+failed new startup sources are not automatically disabled or saved back to JSON.
+Invalid configuration, allocation failure, cancellation, or database startup
+failure can still stop startup.
 
-The in-process blocklist service supports add, replace, refresh, and remove.
-Failed replacements/refreshes retain the previous complete snapshot. Source
-membership is preserved: deleting or refreshing one source cannot remove a name
-still provided by another. Explicit blocks remain independent of imported names.
-Mutation commits require the publication mutex. Main is the sole writer and
-prepares source contents outside that mutex; it never changes live memberships
-until all participating plans have reserved capacity successfully. Queries cannot
-borrow managed strings or records beyond their guarded answer construction.
+Imported memberships are durable in a **separate SQLite database**, selected with
+`--lists-database <path>`. Its default is the complete `--database` path with
+`.lists.sqlite3` appended: `--database /data/voiddns.sqlite3` uses
+`/data/voiddns.sqlite3.lists.sqlite3` for imported lists. This is not the telemetry
+database. Keep its directory writable and persistent, including SQLite sidecar
+files. Explicit relative paths resolve against the working directory.
+
+The storage model is generic: `lists`, `domains`, and `list_domains` track list
+metadata, deduplicated normalized domains, and memberships. The only supported
+list kind is `block`; this does not add imported allowlists or new configuration
+names. The JSON file remains authoritative for definitions, enabled flags,
+explicit rules, and local records. Stored snapshots never recreate deleted JSON
+definitions. DNS policy checks use only the RAM index, never SQLite.
+
+A saved snapshot is eligible only when its source fingerprint matches the active
+definition and import semantic version. The fingerprint covers source kind,
+location and format, API-managed provenance, private-source access policy,
+configured file root, and the resolved configuration base directory. Display
+name and enabled-state changes do not change source identity. Changing a
+location, parser semantics, or access policy cannot resurrect an unrelated or
+no-longer-compatible snapshot. Failed fetches with
+a compatible snapshot serve it as **degraded**. With no compatible snapshot,
+the enabled source is **unavailable**. A successful fetch is **active**, and its
+complete result replaces the previous saved and RAM memberships, including a
+successful empty import. **Disabled** sources do not contribute RAM memberships
+but retain their saved snapshot; re-enabling still fetches first. Deleting a
+source removes its stored memberships. Names supplied by another source remain
+blocked, and explicit blocks stay independent of imported names.
+
+The API and blocklist UI expose response-only `status`: `state`, safe
+`last_error`, nullable `last_success_at_ms` (Unix epoch milliseconds), and
+`domain_count`. These runtime fields are not accepted in source write bodies
+and never persist in configuration JSON. A successful management operation can
+publish degraded or unavailable source health; inspect it rather than assuming
+every enabled source is serving fresh data.
+
+Reload retains unchanged snapshots, so unrelated record edits work even when an
+existing source is unavailable. No automatic refresh scheduler, file watcher,
+or peer synchronization is implemented. The in-process service supports add,
+replace, refresh, and remove. Mutation commits require the publication mutex.
+Main is the sole writer and prepares source contents outside that mutex; it
+never changes live memberships until all participating plans have reserved
+capacity successfully. Queries cannot borrow managed strings or records beyond
+their guarded answer construction.
+
+Prepared snapshot transactions commit before RAM publication. A later allocation
+or activation failure can leave newer snapshots on disk while DNS continues using
+the preceding RAM state. No SQLite operation runs under the DNS publication lock.
+
+Run the localhost restart, fallback, and membership integration checks with:
+
+```sh
+zig build test-lists
+```
 
 - `domains/domain.zig` and `domains/store.zig`: normalization and explicit sets.
 - `blocklist/source.zig`, `fetch.zig`, `parse.zig`: definitions and bounded import.
 - `blocklist/index.zig`: RAM hash index with one interned name per unique domain,
   membership counts, and per-source slices referencing those names.
 - `blocklist/service.zig`: owned source lifecycle and transactional replacement.
+- `lists/store.zig`: durable generic list snapshots and source compatibility.
 - `state/state.zig`, `state/filtering.zig`: state ownership and startup construction.
 - `state/apply.zig`: prepared source/rule/record diffs and atomic publication.
 - `policy/policy.zig`: precedence; `resolver/resolver.zig`: response construction
@@ -924,7 +975,7 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 | `GET/PUT/DELETE /domains/{id}` | Read, replace, or delete an explicit rule |
 | `GET /records`, `POST /records` | List or create local IN A/AAAA record sets |
 | `GET/PUT/DELETE /records/{id}` | Read, replace, or delete a record set |
-| `GET /blocklists`, `POST /blocklists` | List or create blocklist source definitions |
+| `GET /blocklists`, `POST /blocklists` | List definitions with runtime health, or create a blocklist source definition |
 | `GET/PUT/DELETE /blocklists/{id}` | Read, replace, or delete a source |
 | `POST /blocklists/{id}/refresh` | Refresh one source from its active definition |
 | `POST /blocklists/refresh` | Atomically refresh all enabled sources |
@@ -977,14 +1028,15 @@ IDs return `404`. Operation IDs and revisions reset on restart.
 
 CRUD and settings writes build a candidate from the active configuration,
 validate it, atomically save it, then prepare and publish its runtime changes.
-The saved file—not a separate database—makes these changes survive restart.
+The saved JSON file makes definitions survive restart; the separate list database
+persists imported membership snapshots, not configuration authority.
 File saving, source loading, and parsing happen in a background preparation
 task. Main remains the only publisher; GETs and operation polling can proceed
 while source I/O is pending. Runtime cache/pool inspection or replacement can
 wait for an in-progress DNS resolution boundary.
 
-If import or listener activation fails after saving, the old runtime stays
-active while the candidate remains on disk. The failed operation reports
+If preparation, storage, or listener activation fails after saving, the old runtime
+stays active while the candidate remains on disk. The failed operation reports
 `saved: true, active: false`; `/status.saved_matches_active` becomes false.
 It is null while an operation is running. The agreement flag tracks operations
 performed by this process; it does not detect external file edits. A directory
@@ -1065,8 +1117,9 @@ manually assigned name, and first/last seen times. The requests table contains
 individual events. Addresses exclude ports; a shared DNS proxy appears as one
 client. DHCP address reuse does not establish device identity. Client metadata
 survives independently of history and is not peer-synchronized. Configuration,
-rules, and local records still persist in the operator JSON file. DNS responses,
-filtering indexes, and imported contents remain RAM-only.
+rules, and local records still persist in the operator JSON file. DNS responses
+and filtering lookup indexes remain RAM-only; imported memberships also have
+durable snapshots in the separate list database described above.
 
 Requests retain a rolling seven days based on receive time. Reads exclude
 expired rows immediately. Cleanup runs at startup and every five minutes in

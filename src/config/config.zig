@@ -65,9 +65,9 @@ pub const Config = struct {
     /// Materialize enabled sources for startup, not incremental reload.
     /// The returned filtering state is independently owned; records are attached
     /// separately by main as a guarded borrow from the active configuration.
-    pub fn prepareState(self: *const Config, io: std.Io, diagnostic: *Diagnostic) !State {
+    pub fn prepareState(self: *const Config, io: std.Io, store: ?*@import("../lists/store.zig").Store, diagnostic: *Diagnostic) !State {
         diagnostic.* = .{};
-        return filtering.build(self.allocator, io, &self.definitions, self.base_dir) catch |err| {
+        return filtering.build(self.allocator, io, &self.definitions, self.base_dir, store) catch |err| {
             diagnostic.set("blocks/allows: {s}", .{@errorName(err)});
             return err;
         };
@@ -617,7 +617,7 @@ test "unified configuration owns explicit filtering and loads paths relative to 
     var diagnostic: Diagnostic = .{};
     var config = try load(allocator, std.testing.io, path, &diagnostic);
     defer config.deinit();
-    var state = try config.prepareState(std.testing.io, &diagnostic);
+    var state = try config.prepareState(std.testing.io, null, &diagnostic);
     defer state.deinit();
     try std.testing.expect(state.domains.isBlocked("blocked.example"));
     try std.testing.expect(state.domains.isAllowed("allowed.example"));
@@ -684,7 +684,7 @@ test "prepared runtime state outlives its configuration definitions" {
             \\"allows":{"domains":["Allowed.Example"]}}
         , ".", &diagnostic);
         defer config.deinit();
-        break :blk try config.prepareState(std.testing.io, &diagnostic);
+        break :blk try config.prepareState(std.testing.io, null, &diagnostic);
     };
     defer state.deinit();
     try std.testing.expect(state.domains.isBlocked("blocked.example"));

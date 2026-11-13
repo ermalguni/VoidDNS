@@ -10,7 +10,8 @@ import { ErrorNotice, PageHeading } from '../components';
 type Domain = Schema<'Domain'>;
 type RecordSet = Schema<'Record'>;
 type Source = Schema<'Source'>;
-type Resource = Domain | RecordSet | Source;
+type SourceView = Schema<'SourceView'>;
+type Resource = Domain | RecordSet | SourceView;
 type Kind = 'domains' | 'records' | 'blocklists';
 type Page<T> = { items: T[]; next_cursor: string | null; revision: number };
 type Snapshot = { data: Resource | Page<Resource>; etag: string };
@@ -20,7 +21,14 @@ type FormProps<T> = { initial?: T; disabled: boolean; busy: boolean; onSubmit: (
 const labels = {
   domains: { title: 'Domain rules', singular: 'domain rule', description: 'Exact-name policy. Explicit blocks take precedence over allows and imported lists.' },
   records: { title: 'Local records', singular: 'record set', description: 'Answer A and AAAA questions locally, with ordered addresses and an explicit TTL.' },
-  blocklists: { title: 'Blocklist sources', singular: 'source', description: 'Manage source definitions and refresh their in-memory domain membership.' },
+  blocklists: { title: 'Blocklist sources', singular: 'source', description: 'Manage source definitions, durable snapshots, and live import health.' },
+};
+
+const sourceStates = {
+  disabled: { label: 'Disabled', color: 'gray' },
+  active: { label: 'Active', color: 'teal' },
+  degraded: { label: 'Degraded', color: 'yellow' },
+  unavailable: { label: 'Unavailable', color: 'red' },
 };
 
 function isIPv4(value: string) {
@@ -219,7 +227,7 @@ function ResourceEditor({ kind, selection, onClose, onComplete }: { kind: Kind; 
           <Stack>
             <SnapshotReview snapshot={baseline} />
             <Alert color={deleting ? 'red' : 'teal'} title={deleting ? 'Confirm deletion' : 'Refresh active definitions'}>
-              {deleting ? (kind === 'records' ? 'This removes the entire local record set. An unexpired upstream cache answer may become visible.' : kind === 'blocklists' ? 'This removes the source definition and its imported membership. Names supplied by other sources remain blocked.' : 'This removes the explicit rule and may change how this exact name resolves.') : refreshingAll ? 'All enabled sources are loaded atomically. If any source fails, none of the refreshed memberships activate. Unapplied disk edits are not used.' : 'Load this source using its active definition. A disabled source refresh is a no-op.'}
+              {deleting ? (kind === 'records' ? 'This removes the entire local record set. An unexpired upstream cache answer may become visible.' : kind === 'blocklists' ? 'This removes the source definition and its saved and live imported memberships. Names supplied by other sources remain blocked.' : 'This removes the explicit rule and may change how this exact name resolves.') : refreshingAll ? 'Fetch every enabled source, then publish prepared updates together. Failed fetches use compatible saved snapshots; sources without one remain unavailable. Unapplied disk edits are not used.' : 'Fetch this source using its active definition. A failed fetch uses a compatible saved snapshot, or leaves the source unavailable if none exists. A disabled source refresh is a no-op.'}
             </Alert>
             <Button color={deleting ? 'red' : 'teal'} disabled={disabled} loading={writer.busy} onClick={() => void submit(undefined)}>{deleting ? 'Confirm delete' : refreshingAll ? 'Refresh all enabled sources' : 'Refresh source'}</Button>
           </Stack>
@@ -240,8 +248,22 @@ function ResourceCells({ kind, item }: { kind: Kind; item: Resource }) {
     const record = item as RecordSet;
     return <><Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{record.name}</Text></Table.Td><Table.Td><Badge variant="light" color="gray">{record.type}</Badge></Table.Td><Table.Td><Stack gap={2}>{record.addresses.map((address) => <Text key={address} size="sm" style={{ overflowWrap: 'anywhere' }}>{address}</Text>)}</Stack></Table.Td><Table.Td>{record.ttl}s</Table.Td></>;
   }
-  const source = item as Source;
-  return <><Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{source.name || source.id}</Text>{source.name ? <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{source.id}</Text> : null}</Table.Td><Table.Td><Badge variant="light" color={source.enabled === false ? 'gray' : 'teal'}>{source.enabled === false ? 'Disabled' : 'Enabled'}</Badge></Table.Td><Table.Td><Text size="sm" style={{ overflowWrap: 'anywhere' }}>{source.source.value}</Text><Text size="xs" c="dimmed">{source.source.kind} · {source.format} · {source.api_managed ? 'API-managed' : 'Operator-provided'}</Text></Table.Td></>;
+  const source = item as SourceView;
+  const status = source.status;
+  const state = sourceStates[status.state];
+  return <>
+    <Table.Td><Text fw={500} style={{ overflowWrap: 'anywhere' }}>{source.name || source.id}</Text>{source.name ? <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{source.id}</Text> : null}</Table.Td>
+    <Table.Td>
+      <Stack gap={2}>
+        <Badge variant="light" color={state.color}>{state.label}</Badge>
+        {status.state === 'degraded' ? <Text size="xs">Serving a saved snapshot</Text> : status.state === 'unavailable' ? <Text size="xs">Enabled, no compatible snapshot</Text> : null}
+        <Text size="xs">{status.domain_count.toLocaleString()} {status.domain_count === 1 ? 'domain' : 'domains'}</Text>
+        <Text size="xs" c="dimmed">Last successful import: {status.last_success_at_ms === null ? 'Never' : new Date(status.last_success_at_ms).toLocaleString()}</Text>
+        {status.last_error !== null ? <Text size="xs" c={status.state === 'unavailable' ? 'red' : 'yellow'} style={{ overflowWrap: 'anywhere' }}>Last error: {status.last_error}</Text> : null}
+      </Stack>
+    </Table.Td>
+    <Table.Td><Text size="sm" style={{ overflowWrap: 'anywhere' }}>{source.source.value}</Text><Text size="xs" c="dimmed">{source.source.kind} · {source.format} · {source.api_managed ? 'API-managed' : 'Operator-provided'}</Text></Table.Td>
+  </>;
 }
 
 function CollectionPage({ kind }: { kind: Kind }) {
@@ -334,7 +356,7 @@ function CollectionPage({ kind }: { kind: Kind }) {
           </Group>
         </Box>
       ) : null}
-      {kind === 'blocklists' ? <Text size="sm" c="dimmed">Refresh is not configuration reload. Imported snapshots live in memory and rebuild after restart. Disabled sources remain validated but do not import names.</Text> : null}
+      {kind === 'blocklists' ? <Text size="sm" c="dimmed">Refresh is not configuration reload. Restart and refresh fetch first, falling back only to a compatible saved snapshot. DNS lookups use RAM. Disabling retains the saved snapshot; deleting removes it.</Text> : null}
       {selection ? <ResourceEditor key={`${selection.action}:${selection.id ?? ''}`} kind={kind} selection={selection} onClose={() => setSelection(null)} onComplete={() => { setSelection(null); setCursors([null]); setRestarted(false); }} /> : null}
     </Stack>
   );

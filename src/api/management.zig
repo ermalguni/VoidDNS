@@ -16,6 +16,19 @@ const Record = std.meta.Elem(@FieldType(Document, "records"));
 const Source = std.meta.Elem(@FieldType(@FieldType(Document, "blocks"), "lists"));
 const Domain = struct { id: []const u8, domain: []const u8, action: enum { allow, block } };
 const RecordView = struct { id: []const u8, name: []const u8, type: @FieldType(Record, "type"), ttl: u32, addresses: []const []const u8 };
+const SourceView = struct {
+    id: []const u8,
+    name: ?[]const u8,
+    enabled: bool,
+    source: @FieldType(Source, "source"),
+    format: @FieldType(Source, "format"),
+    api_managed: bool,
+    status: Service.Health,
+
+    fn init(source: Source, status: Service.Health) SourceView {
+        return .{ .id = source.id, .name = source.name, .enabled = source.enabled, .source = source.source, .format = source.format, .api_managed = source.api_managed, .status = status };
+    }
+};
 const Settings = struct { dns: @FieldType(Document, "dns"), upstream: @FieldType(Document, "upstream"), cache: @FieldType(Document, "cache"), logging: @FieldType(Document, "logging") };
 
 pub const Management = struct {
@@ -494,11 +507,21 @@ pub const Management = struct {
             if (id != null) return failure(a, 404, "RecordNotFound", self.revision);
             return self.page(RecordView, a, items.items, query);
         } else {
+            self.state.mutex.lockUncancelable(self.io);
+            defer self.state.mutex.unlock(self.io);
             if (id) |wanted| {
-                for (doc.blocks.lists) |source| if (eq(source.id, wanted)) return json(a, 200, source, self.revision);
+                for (doc.blocks.lists) |source| if (eq(source.id, wanted)) {
+                    const status = self.state.lists.health(source.id) orelse return error.SourceNotFound;
+                    return json(a, 200, SourceView.init(source, status), self.revision);
+                };
                 return failure(a, 404, "SourceNotFound", self.revision);
             }
-            return self.page(Source, a, try a.dupe(Source, doc.blocks.lists), query);
+            const items = try a.alloc(SourceView, doc.blocks.lists.len);
+            for (doc.blocks.lists, items) |source, *item| {
+                const status = self.state.lists.health(source.id) orelse return error.SourceNotFound;
+                item.* = SourceView.init(source, status);
+            }
+            return self.page(SourceView, a, items, query);
         }
     }
 
@@ -701,6 +724,9 @@ test "typed resource JSON rejects coercions and ambiguous queries" {
     try std.testing.expectError(error.InvalidJsonType, parseBody(Record, a,
         \\{"name":"home.test","type":"A","ttl":1.5,"addresses":["192.0.2.1"]}
     ));
+    try std.testing.expectError(error.UnknownField, parseBody(Source, a,
+        \\{"id":"feed","source":{"kind":"file","value":"feed.txt"},"format":"domains","status":{"state":"active","last_error":null,"last_success_at_ms":null,"domain_count":0}}
+    ));
     try std.testing.expectError(error.DuplicateParameter, parameter(a, "limit=1&limit=2", "limit"));
     try std.testing.expectError(error.InvalidEncoding, decode(a, "bad%0"));
     try std.testing.expectError(error.InvalidEncoding, decode(a, "bad%00"));
@@ -715,7 +741,7 @@ test "management policy matches record family and collections enforce revision c
         \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"HOME.test.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["z.test","a.test"]},"allows":{"domains":["allow.test"]}}
     , ".", &diagnostic);
     defer settings.deinit();
-    var state = try settings.prepareState(io, &diagnostic);
+    var state = try settings.prepareState(io, null, &diagnostic);
     defer state.deinit();
     state.records = settings.records;
     var mailbox: control.Mailbox = .{};
@@ -775,7 +801,12 @@ test "management policy matches record family and collections enforce revision c
     // A valid source ID must not be hidden by the bulk-refresh action route.
     // Collection reads use the active document, so add the same definition.
     try settings.definitions.sources.append(allocator, try state.lists.sources.get("refresh").?.source.clone(allocator));
-    try std.testing.expectEqual(@as(u16, 200), (try management.handle(a, request)).status);
+    const source_response = try management.handle(a, request);
+    try std.testing.expectEqual(@as(u16, 200), source_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, source_response.body, "\"status\":{\"state\":\"disabled\",\"last_error\":null,\"last_success_at_ms\":null,\"domain_count\":0}") != null);
+    request.path = "/api/v1/blocklists";
+    const source_collection = try management.handle(a, request);
+    try std.testing.expect(std.mem.indexOf(u8, source_collection.body, "\"status\":{\"state\":\"disabled\"") != null);
     request.path = "/api/v1/blocklists/refresh/refresh";
     request.method = "POST";
     request.if_match = "\"2\"";

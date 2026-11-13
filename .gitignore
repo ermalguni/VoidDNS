@@ -5,3 +5,4 @@ zig-pkg/
 examples/api.key
 ui/node_modules/
 ui/dist/
+.vscode/settings.json

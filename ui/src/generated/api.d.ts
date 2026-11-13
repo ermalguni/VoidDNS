@@ -537,6 +537,7 @@ export interface components {
             /** @default true */
             enabled: boolean;
         };
+        /** @description Editable blocklist source definition. Runtime status is response-only and is rejected in input. */
         Source: {
             id: string;
             name?: string | null;
@@ -551,6 +552,33 @@ export interface components {
             format: "domains" | "hosts";
             /** @description Persistent provenance marker enforced by the server. New/content-changed sources become managed; a client cannot clear the marker on an existing managed source. */
             api_managed?: boolean;
+        };
+        /** @description Runtime import health, never persisted into configuration JSON. Error names contain no source location. */
+        SourceHealth: {
+            /**
+             * @description active: fetch succeeded; degraded: fetch failed and a compatible snapshot is serving; unavailable: enabled without a compatible snapshot; disabled: not serving imported names.
+             * @enum {string}
+             */
+            state: "disabled" | "active" | "degraded" | "unavailable";
+            /** @description Safe error name from the latest failed import, without URLs or file paths. */
+            last_error: string | null;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds of the snapshot's last successful import, or null if none.
+             */
+            last_success_at_ms: number | null;
+            /** @description Domain membership count for this source's runtime snapshot. */
+            domain_count: number;
+        };
+        /** @description Response-only blocklist source definition and current runtime health. Use Source, without status, for writes. */
+        SourceView: {
+            id: components["schemas"]["Source"]["id"];
+            name: components["schemas"]["Source"]["name"];
+            enabled: components["schemas"]["Source"]["enabled"];
+            source: components["schemas"]["Source"]["source"];
+            format: components["schemas"]["Source"]["format"];
+            api_managed: components["schemas"]["Source"]["api_managed"];
+            readonly status: components["schemas"]["SourceHealth"];
         };
         RecordInput: {
             name: string;
@@ -2359,7 +2387,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        items: components["schemas"]["Source"][];
+                        items: components["schemas"]["SourceView"][];
                         next_cursor: string | null;
                         revision: number;
                     };
@@ -2522,7 +2550,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Source"];
+                    "application/json": components["schemas"]["SourceView"];
                 };
             };
             /** @description Invalid request */
@@ -2878,7 +2906,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Source"];
+                    "application/json": components["schemas"]["SourceView"];
                 };
             };
             /** @description Invalid request */

@@ -3,6 +3,7 @@ const Source = @import("source.zig").Source;
 const fetch = @import("fetch.zig");
 const parse = @import("parse.zig");
 const Index = @import("index.zig").Index;
+const Store = @import("../lists/store.zig").Store;
 const log = std.log.scoped(.blocklist);
 
 /// Mutations run before serving, or under the caller's exclusive publication
@@ -11,6 +12,15 @@ pub const Service = struct {
     const Entry = struct {
         source: Source,
         snapshot: Index.Snapshot,
+        health: Health,
+        fingerprint: ?[64]u8 = null,
+    };
+
+    pub const Health = struct {
+        state: enum { disabled, active, degraded, unavailable },
+        last_error: ?[]const u8 = null,
+        last_success_at_ms: ?i64 = null,
+        domain_count: usize = 0,
     };
 
     pub const Refresh = union(enum) {
@@ -27,6 +37,8 @@ pub const Service = struct {
             source: Source,
             names: ?parse.Names = null,
             snapshot: ?[][]const u8 = null,
+            health: ?Health = null,
+            fingerprint: ?[64]u8 = null,
         };
 
         allocator: std.mem.Allocator,
@@ -83,6 +95,8 @@ pub const Service = struct {
                     entry.* = .{
                         .source = change.source,
                         .snapshot = change.snapshot orelse old.snapshot,
+                        .health = change.health orelse old.health,
+                        .fingerprint = change.fingerprint,
                     };
                     if (change.snapshot != null) service.index.release(old.snapshot);
                     if (old.source.name) |name| self.allocator.free(name);
@@ -92,6 +106,8 @@ pub const Service = struct {
                     service.sources.putAssumeCapacityNoClobber(change.source.id, .{
                         .source = change.source,
                         .snapshot = change.snapshot.?,
+                        .health = change.health.?,
+                        .fingerprint = change.fingerprint,
                     });
                 }
             }
@@ -107,6 +123,8 @@ pub const Service = struct {
     allocator: std.mem.Allocator,
     sources: std.StringHashMapUnmanaged(Entry) = .empty,
     index: Index,
+    /// Borrowed; owned by the process and assigned before startup imports.
+    store: ?*Store = null,
 
     pub fn init(allocator: std.mem.Allocator) Service {
         return .{ .allocator = allocator, .index = Index.init(allocator) };
@@ -127,9 +145,17 @@ pub const Service = struct {
         return self.index.contains(canonical);
     }
 
+    /// Borrowed runtime values; callers hold the state publication mutex.
+    pub fn health(self: *const Service, id: []const u8) ?Health {
+        return if (self.sources.get(id)) |entry| entry.health else null;
+    }
+
     /// Compare definitions by ID, independent of order. Only additions,
     /// newly-enabled sources, changed locations/formats, or explicit refreshes
     /// perform I/O. Never reads the live domain index during preparation.
+    /// Cache writes commit atomically during preparation, before publication.
+    /// If a later RAM reserve/publication fails, durable successful snapshots
+    /// may be newer than active RAM; the next import still fetches first.
     pub fn prepare(self: *const Service, io: std.Io, definitions: []const Source, base_dir: []const u8, requested: Refresh) !Plan {
         var plan: Plan = .{ .allocator = self.allocator };
         errdefer plan.deinit();
@@ -145,7 +171,15 @@ pub const Service = struct {
             .one => |id| if (!seen.contains(id)) return error.SourceNotFound,
             else => {},
         }
+        const resolved_base = if (self.store != null and definitions.len != 0)
+            try std.Io.Dir.cwd().realPathFileAlloc(io, base_dir, self.allocator)
+        else
+            null;
+        defer if (resolved_base) |path| self.allocator.free(path);
+        var transaction: ?Store.Transaction = if (self.store) |store| try store.begin() else null;
+        defer if (transaction) |*tx| tx.deinit();
         for (definitions) |source| {
+            const fingerprint_value = if (resolved_base) |path| fingerprint(source, path) else null;
             const old = self.sources.get(source.id);
             const explicit_refresh = source.enabled and switch (requested) {
                 .none => false,
@@ -153,7 +187,8 @@ pub const Service = struct {
                 .one => |id| std.mem.eql(u8, source.id, id),
             };
             const content_changed = if (old) |entry|
-                source.enabled != entry.source.enabled or !sameLocation(source, entry.source)
+                source.enabled != entry.source.enabled or !sameLocation(source, entry.source) or
+                    !sameFingerprint(fingerprint_value, entry.fingerprint)
             else
                 true;
             const metadata_changed = if (old) |entry|
@@ -163,13 +198,16 @@ pub const Service = struct {
             if (!metadata_changed and !explicit_refresh) continue;
 
             var change: Plan.Change = .{ .source = try source.clone(self.allocator) };
+            change.fingerprint = fingerprint_value;
             errdefer change.source.deinit(self.allocator);
             errdefer if (change.names) |*names| names.deinit();
             errdefer if (change.snapshot) |snapshot| self.allocator.free(snapshot);
             if ((source.enabled and (content_changed or explicit_refresh)) or old == null or
                 (old != null and old.?.source.enabled and !source.enabled))
             {
-                change.names = try self.loadNames(io, source, base_dir);
+                const loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, fingerprint_value);
+                change.names = loaded.names;
+                change.health = loaded.health;
                 change.snapshot = try self.allocator.alloc([]const u8, change.names.?.entries.count());
                 plan.incoming_names = std.math.add(u32, plan.incoming_names, change.names.?.entries.count()) catch return error.OutOfMemory;
             }
@@ -179,6 +217,10 @@ pub const Service = struct {
         var existing = self.sources.keyIterator();
         while (existing.next()) |id| {
             if (!seen.contains(id.*)) try plan.removals.append(self.allocator, id.*);
+        }
+        if (transaction) |*tx| {
+            try tx.retain(&seen);
+            try tx.commit();
         }
         return plan;
     }
@@ -196,6 +238,33 @@ pub const Service = struct {
         return b == null;
     }
 
+    fn sameFingerprint(a: ?[64]u8, b: ?[64]u8) bool {
+        if (a) |left| return if (b) |right| std.mem.eql(u8, &left, &right) else false;
+        return b == null;
+    }
+
+    fn fingerprint(source: Source, resolved_base: []const u8) [64]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        // Length-prefixed fields avoid delimiter collisions. A version prefix
+        // prevents reusing snapshots if import/security semantics change.
+        const fields = [_][]const u8{
+            "block-import-v1", @tagName(source.source.kind), source.source.value,
+            @tagName(source.format), if (source.api_managed) "managed" else "operator",
+            if (source.access.allow_private_sources) "private" else "public",
+            if (source.access.file_root != null) "root" else "no-root",
+            source.access.file_root orelse "", resolved_base,
+        };
+        for (fields) |field| {
+            var length: [8]u8 = undefined;
+            std.mem.writeInt(u64, &length, @intCast(field.len), .little);
+            hasher.update(&length);
+            hasher.update(field);
+        }
+        var digest: [32]u8 = undefined;
+        hasher.final(&digest);
+        return std.fmt.bytesToHex(digest, .lower);
+    }
+
     /// Definitions and snapshots are owned, including disabled definitions.
     pub fn add(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !void {
         try source.validate();
@@ -203,56 +272,111 @@ pub const Service = struct {
         var owned = try source.clone(self.allocator);
         errdefer owned.deinit(self.allocator);
         try self.sources.ensureUnusedCapacity(self.allocator, 1);
-        const snapshot = try self.load(io, owned, base_dir);
-        self.sources.putAssumeCapacityNoClobber(owned.id, .{ .source = owned, .snapshot = snapshot });
-        self.report("added", owned, snapshot.len);
+        const loaded = try self.load(io, owned, base_dir);
+        self.sources.putAssumeCapacityNoClobber(owned.id, .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint });
+        self.report("added", owned, loaded.snapshot.len);
     }
 
-    /// Replace metadata and content together, retaining the stable ID. Failed
-    /// validation, fetch, parse, or allocation leaves the last known good entry.
+    /// Replace metadata and content together, retaining the stable ID. Durable
+    /// imports expose degraded/unavailable health on fetch or parse failure.
     pub fn replace(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !void {
         try source.validate();
         const entry = self.sources.getPtr(source.id) orelse return error.SourceNotFound;
         var owned = try source.clone(self.allocator);
         errdefer owned.deinit(self.allocator);
-        const snapshot = try self.load(io, owned, base_dir);
+        const loaded = try self.load(io, owned, base_dir);
         const old = entry.*;
         // Keep the hash table key allocation stable while replacing other fields.
         self.allocator.free(owned.id);
         owned.id = old.source.id;
-        entry.* = .{ .source = owned, .snapshot = snapshot };
+        entry.* = .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint };
         self.index.release(old.snapshot);
         if (old.source.name) |name| self.allocator.free(name);
         self.allocator.free(old.source.source.value);
         if (old.source.access.file_root) |root| self.allocator.free(root);
-        self.report("replaced", owned, snapshot.len);
+        self.report("replaced", owned, loaded.snapshot.len);
     }
 
     pub fn refresh(self: *Service, id: []const u8, io: std.Io, base_dir: []const u8) !void {
         const entry = self.sources.getPtr(id) orelse return error.SourceNotFound;
-        const snapshot = try self.load(io, entry.source, base_dir);
+        const loaded = try self.load(io, entry.source, base_dir);
         const old = entry.snapshot;
-        entry.snapshot = snapshot;
+        entry.snapshot = loaded.snapshot;
+        entry.health = loaded.health;
+        entry.fingerprint = loaded.fingerprint;
         self.index.release(old);
-        self.report("refreshed", entry.source, snapshot.len);
+        self.report("refreshed", entry.source, loaded.snapshot.len);
     }
 
     pub fn remove(self: *Service, id: []const u8) !void {
-        var entry = (self.sources.fetchRemove(id) orelse return error.SourceNotFound).value;
+        if (!self.sources.contains(id)) return error.SourceNotFound;
+        if (self.store) |store| {
+            var transaction = try store.begin();
+            defer transaction.deinit();
+            try transaction.remove(id);
+            try transaction.commit();
+        }
+        var entry = self.sources.fetchRemove(id).?.value;
         self.report("removed", entry.source, entry.snapshot.len);
         self.index.release(entry.snapshot);
         entry.source.deinit(self.allocator);
     }
 
-    fn load(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !Index.Snapshot {
-        var names = try self.loadNames(io, source, base_dir);
-        defer names.deinit();
-        return self.index.acquire(&names);
+    const Loaded = struct { names: parse.Names, health: Health };
+    const LoadedSnapshot = struct { snapshot: Index.Snapshot, health: Health, fingerprint: ?[64]u8 };
+
+    fn load(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !LoadedSnapshot {
+        var transaction: ?Store.Transaction = if (self.store) |store| try store.begin() else null;
+        defer if (transaction) |*tx| tx.deinit();
+        const resolved_base = if (self.store != null)
+            try std.Io.Dir.cwd().realPathFileAlloc(io, base_dir, self.allocator)
+        else
+            null;
+        defer if (resolved_base) |path| self.allocator.free(path);
+        const key = if (resolved_base) |path| fingerprint(source, path) else null;
+        var loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, key);
+        defer loaded.names.deinit();
+        const snapshot = try self.index.acquire(&loaded.names);
+        errdefer self.index.release(snapshot);
+        if (transaction) |*tx| try tx.commit();
+        return .{ .snapshot = snapshot, .health = loaded.health, .fingerprint = key };
     }
 
-    fn loadNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8) !parse.Names {
-        errdefer log.warn("source id={s} name={s}: import failed; published state unchanged", .{ source.id, source.name orelse "(unnamed)" });
-        if (!source.enabled) return .{ .allocator = self.allocator };
+    fn loadNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8, transaction: ?*Store.Transaction, key: ?[64]u8) !Loaded {
+        if (!source.enabled) return .{ .names = .{ .allocator = self.allocator }, .health = .{ .state = .disabled } };
+        const tx = transaction orelse {
+            const names = try self.fetchNames(io, source, base_dir);
+            return .{ .names = names, .health = .{ .state = .active, .domain_count = names.entries.count(), .last_success_at_ms = std.Io.Clock.real.now(io).toMilliseconds() } };
+        };
+        var failure: ?anyerror = null;
+        var fetched: ?parse.Names = self.fetchNames(io, source, base_dir) catch |err| blk: {
+            switch (err) {
+                error.OutOfMemory, error.Canceled, error.ConcurrencyUnavailable => return err,
+                else => {},
+            }
+            failure = err;
+            break :blk null;
+        };
+        defer if (fetched) |*names| names.deinit();
+        const fingerprint_value = key.?;
+        if (fetched) |*names| {
+            try tx.replace(source.id, "block", &fingerprint_value, names, std.Io.Clock.real.now(io).toMilliseconds());
+            names.deinit();
+            fetched = null;
+        }
+        if (try tx.load(self.allocator, source.id, &fingerprint_value)) |saved| {
+            return .{ .names = saved.names, .health = .{
+                .state = if (failure != null) .degraded else .active,
+                .last_error = if (failure) |err| @errorName(err) else null,
+                .last_success_at_ms = saved.last_success_at_ms,
+                .domain_count = saved.names.entries.count(),
+            } };
+        }
+        if (failure == null) return error.SnapshotMissing;
+        return .{ .names = .{ .allocator = self.allocator }, .health = .{ .state = .unavailable, .last_error = @errorName(failure.?) } };
+    }
+
+    fn fetchNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8) !parse.Names {
         const contents = try fetch.load(self.allocator, io, source, base_dir);
         defer self.allocator.free(contents);
         return parse.parse(self.allocator, contents, source.format);
@@ -580,4 +704,243 @@ test "every preparation allocation failure releases staging and preserves active
     defer std.testing.allocator.free(base);
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "list", .data = "shared.test\n" });
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareWithFailingAllocator, .{base});
+}
+
+test "durable restart fetches first and falls back to compatible saved memberships" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    const source: Source = .{ .id = "first", .source = .{ .kind = .file, .value = "first" }, .format = .domains };
+    var successful_at: ?i64 = null;
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "saved.test\n" });
+    {
+        var store = try Store.init(allocator, io, path);
+        defer store.deinit();
+        var service = Service.init(allocator);
+        defer service.deinit();
+        service.store = &store;
+        try service.add(io, source, base);
+        try std.testing.expect(service.contains("saved.test"));
+        try std.testing.expect(service.health(source.id).?.state == .active);
+        successful_at = service.health(source.id).?.last_success_at_ms;
+    }
+    try temporary.dir.deleteFile(io, "first");
+    {
+        var store = try Store.init(allocator, io, path);
+        defer store.deinit();
+        var service = Service.init(allocator);
+        defer service.deinit();
+        service.store = &store;
+        try service.add(io, source, base);
+        try std.testing.expect(service.contains("saved.test"));
+        const status = service.health(source.id).?;
+        try std.testing.expect(status.state == .degraded);
+        try std.testing.expectEqualStrings("FileNotFound", status.last_error.?);
+        try std.testing.expectEqual(successful_at, status.last_success_at_ms);
+        try std.testing.expectEqual(@as(usize, 1), status.domain_count);
+        try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "fresh.test\n" });
+    }
+    {
+        var store = try Store.init(allocator, io, path);
+        defer store.deinit();
+        var service = Service.init(allocator);
+        defer service.deinit();
+        service.store = &store;
+        try service.add(io, source, base);
+        try std.testing.expect(service.health(source.id).?.state == .active);
+        try std.testing.expect(service.contains("fresh.test"));
+        try std.testing.expect(!service.contains("saved.test"));
+    }
+}
+
+test "durable overlap deletion disable retention and successful empty snapshots" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    var store = try Store.init(allocator, io, path);
+    defer store.deinit();
+    var service = Service.init(allocator);
+    defer service.deinit();
+    service.store = &store;
+    var first: Source = .{ .id = "first", .source = .{ .kind = .file, .value = "first" }, .format = .domains };
+    const second: Source = .{ .id = "second", .source = .{ .kind = .file, .value = "second" }, .format = .domains };
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "common.test\nfirst.test\n" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "second", .data = "common.test\nsecond.test\n" });
+    try service.add(io, first, base);
+    try service.add(io, second, base);
+    try service.remove(second.id);
+    try std.testing.expect(service.contains("common.test"));
+    try std.testing.expect(!service.contains("second.test"));
+    try std.testing.expectEqual(@as(i64, 1), (try store.db.one(i64, "SELECT count(*) FROM lists", .{}, .{})).?);
+    first.enabled = false;
+    var disabled = try service.prepare(io, &.{first}, base, .none);
+    defer disabled.deinit();
+    try disabled.reserve(&service);
+    disabled.commit(&service);
+    try std.testing.expect(service.health(first.id).?.state == .disabled);
+    try std.testing.expect(!service.contains("common.test"));
+    try std.testing.expectEqual(@as(i64, 2), (try store.db.one(i64, "SELECT count(*) FROM list_domains", .{}, .{})).?);
+    try temporary.dir.deleteFile(io, "first");
+    first.enabled = true;
+    var enabled = try service.prepare(io, &.{first}, base, .none);
+    defer enabled.deinit();
+    try enabled.reserve(&service);
+    enabled.commit(&service);
+    try std.testing.expect(service.contains("common.test"));
+    try std.testing.expect(service.health(first.id).?.state == .degraded);
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "new.test\n||unsupported.test^\n" });
+    try service.refresh(first.id, io, base);
+    try std.testing.expect(service.health(first.id).?.state == .degraded);
+    try std.testing.expectEqualStrings("InvalidListLine", service.health(first.id).?.last_error.?);
+    try std.testing.expect(service.contains("first.test"));
+    try std.testing.expect(!service.contains("new.test"));
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "" });
+    try service.refresh(first.id, io, base);
+    try std.testing.expect(service.health(first.id).?.state == .active);
+    try std.testing.expectEqual(@as(usize, 0), service.health(first.id).?.domain_count);
+    try temporary.dir.deleteFile(io, "first");
+    try service.refresh(first.id, io, base);
+    try std.testing.expect(service.health(first.id).?.state == .degraded);
+    try std.testing.expect(!service.contains("first.test"));
+    try std.testing.expectEqual(@as(i64, 1), (try store.db.one(i64, "SELECT count(*) FROM lists", .{}, .{})).?);
+    try std.testing.expectEqual(@as(i64, 0), (try store.db.one(i64, "SELECT count(*) FROM domains", .{}, .{})).?);
+    var removed = try service.prepare(io, &.{}, base, .none);
+    defer removed.deinit();
+    try removed.reserve(&service);
+    removed.commit(&service);
+    try std.testing.expectEqual(@as(i64, 0), (try store.db.one(i64, "SELECT count(*) FROM lists", .{}, .{})).?);
+}
+
+test "durable snapshots reject changed location format security context and resolved base" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    var store = try Store.init(allocator, io, path);
+    defer store.deinit();
+    const source: Source = .{ .id = "same", .source = .{ .kind = .file, .value = "first" }, .format = .domains };
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "saved.test\n" });
+    {
+        var service = Service.init(allocator);
+        defer service.deinit();
+        service.store = &store;
+        try service.add(io, source, base);
+    }
+    try temporary.dir.deleteFile(io, "first");
+    try temporary.dir.createDirPath(io, "other");
+    const other = try temporary.dir.realPathFileAlloc(io, "other", allocator);
+    defer allocator.free(other);
+    for (0..6) |variant| {
+        var changed = source;
+        switch (variant) {
+            0 => changed.source.value = "missing",
+            1 => changed.format = .hosts,
+            2 => changed.api_managed = true,
+            3 => changed.access.allow_private_sources = true,
+            4 => changed.access.file_root = base,
+            5 => {},
+            else => unreachable,
+        }
+        var service = Service.init(allocator);
+        defer service.deinit();
+        service.store = &store;
+        try service.add(io, changed, if (variant == 5) other else base);
+        try std.testing.expect(service.sources.get(source.id).?.source.enabled);
+        try std.testing.expect(service.health(source.id).?.state == .unavailable);
+        try std.testing.expect(service.health(source.id).?.last_error != null);
+        try std.testing.expect(service.health(source.id).?.last_success_at_ms == null);
+        try std.testing.expect(!service.contains("saved.test"));
+    }
+    var service = Service.init(allocator);
+    defer service.deinit();
+    service.store = &store;
+    try service.add(io, source, base);
+    try std.testing.expect(service.health(source.id).?.state == .degraded);
+    try std.testing.expect(service.contains("saved.test"));
+    const missing: Source = .{ .id = "new", .source = .{ .kind = .file, .value = "missing" }, .format = .domains };
+    try service.add(io, missing, base);
+    try std.testing.expect(service.health(missing.id).?.state == .unavailable);
+    try std.testing.expect(service.sources.get(missing.id).?.source.enabled);
+}
+
+test "durable refresh-all rolls back DB and preserves unpublished RAM on persistence failure" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    var store = try Store.init(allocator, io, path);
+    defer store.deinit();
+    var service = Service.init(allocator);
+    defer service.deinit();
+    service.store = &store;
+    const first: Source = .{ .id = "first", .source = .{ .kind = .file, .value = "first" }, .format = .domains };
+    const second: Source = .{ .id = "second", .source = .{ .kind = .file, .value = "second" }, .format = .domains };
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "old-first.test\n" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "second", .data = "old-second.test\n" });
+    try service.add(io, first, base);
+    try service.add(io, second, base);
+    const original = service.sources.get(first.id).?;
+    try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "new-first.test\n" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "second", .data = "new-second.test\n" });
+    // Reject preparation of the second write. Unlike an aborting SQL trigger,
+    // authorization failure does not leave a stepped statement whose finalize
+    // repeats the expected error through the dependency's error logger.
+    const c = @import("sqlite").c;
+    const Authorizer = struct {
+        fn authorize(context: ?*anyopaque, action: c_int, table: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            const writes: *usize = @ptrCast(@alignCast(context.?));
+            if (action == c.SQLITE_INSERT and table != null and std.mem.eql(u8, std.mem.span(table), "lists")) {
+                writes.* += 1;
+                if (writes.* == 2) return c.SQLITE_DENY;
+            }
+            return c.SQLITE_OK;
+        }
+    };
+    var writes: usize = 0;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_set_authorizer(store.db.db, Authorizer.authorize, &writes));
+    defer _ = c.sqlite3_set_authorizer(store.db.db, null, null);
+    if (service.prepare(io, &.{ first, second }, base, .all)) |prepared| {
+        var unexpected = prepared;
+        unexpected.deinit();
+        return error.ExpectedPersistenceFailure;
+    } else |err| {
+        try std.testing.expect(err != error.OutOfMemory);
+    }
+    try std.testing.expectEqual(original.snapshot.ptr, service.sources.get(first.id).?.snapshot.ptr);
+    try std.testing.expectEqual(original.health.last_success_at_ms, service.health(first.id).?.last_success_at_ms);
+    try std.testing.expect(service.contains("old-first.test"));
+    try std.testing.expect(service.contains("old-second.test"));
+    try std.testing.expect(!service.contains("new-first.test"));
+    try std.testing.expectEqual(@as(i64, 0), (try store.db.one(i64, "SELECT count(*) FROM domains WHERE name LIKE 'new-%'", .{}, .{})).?);
+    try std.testing.expectEqual(@as(usize, 2), writes);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_set_authorizer(store.db.db, null, null));
+    try temporary.dir.deleteFile(io, "first");
+    try temporary.dir.deleteFile(io, "second");
+    var recovered = try service.prepare(io, &.{ first, second }, base, .all);
+    defer recovered.deinit();
+    // Background preparation cannot publish health or memberships.
+    try std.testing.expect(service.health(first.id).?.state == .active);
+    try recovered.reserve(&service);
+    recovered.commit(&service);
+    try std.testing.expect(service.health(first.id).?.state == .degraded);
+    try std.testing.expect(service.contains("old-first.test"));
+    try std.testing.expect(service.contains("old-second.test"));
 }

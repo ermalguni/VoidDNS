@@ -166,6 +166,12 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("test-integration", "Test SQLite telemetry with localhost DNS and HTTP");
     integration_step.dependOn(&telemetry_integration.step);
 
+    const lists_integration = b.addSystemCommand(&.{"python3"});
+    lists_integration.addFileArg(b.path("tests/lists_integration.py"));
+    lists_integration.addArtifactArg(exe);
+    const lists_step = b.step("test-lists", "Test durable list snapshots with localhost DNS and HTTP");
+    lists_step.dependOn(&lists_integration.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

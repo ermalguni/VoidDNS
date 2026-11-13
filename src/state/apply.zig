@@ -163,7 +163,7 @@ test "record and rule diff preserves unchanged ownership and applies deletions" 
         \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]},{"name":"KEEP.TEST.","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["KEEP.TEST.","new.test"]},"allows":{"domains":[]}}
     , ".", &diagnostic);
     defer candidate.deinit();
-    var state = try previous.prepareState(std.testing.io, &diagnostic);
+    var state = try previous.prepareState(std.testing.io, null, &diagnostic);
     defer state.deinit();
     state.records = previous.records;
     const name = previous.records[0].name.ptr;
@@ -195,7 +195,7 @@ test "normalized record reordering and duplicate explicit rules are a no-op" {
         \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"TWO.TEST.","type":"AAAA","addresses":["::1"]},{"name":"one.test","type":"A","addresses":["192.0.2.1"]}],"blocks":{"domains":["ONE.TEST.","one.test"]}}
     , ".", &diagnostic);
     defer candidate.deinit();
-    var state = try previous.prepareState(std.testing.io, &diagnostic);
+    var state = try previous.prepareState(std.testing.io, null, &diagnostic);
     defer state.deinit();
     var plan = try Plan.prepare(allocator, std.testing.io, &state, &previous, &candidate);
     defer plan.deinit();
@@ -217,7 +217,7 @@ fn allocationFailure(allocator: std.mem.Allocator) !void {
         \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"records":[{"name":"new.test","type":"A","addresses":["192.0.2.2"]}],"blocks":{"domains":["new.test"]},"allows":{"domains":["allow.test"]}}
     , ".", &diagnostic);
     defer candidate.deinit();
-    var state = try previous.prepareState(std.testing.io, &diagnostic);
+    var state = try previous.prepareState(std.testing.io, null, &diagnostic);
     defer state.deinit();
     state.records = previous.records;
     errdefer {

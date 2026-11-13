@@ -8,6 +8,7 @@ const Worker = @import("server/server.zig").Worker;
 const control = @import("server/control.zig");
 const logging = @import("logging.zig");
 const Telemetry = @import("telemetry/store.zig").Store;
+const ListStore = @import("lists/store.zig").Store;
 
 // Keep all levels compiled in; configuration publication selects the threshold.
 pub const std_options: std.Options = .{
@@ -15,19 +16,22 @@ pub const std_options: std.Options = .{
     .logFn = logging.logFn,
 };
 
-const usage = "Usage: VoidDNS --config <path> [--database <path>] [--control-stdin]\n" ++
+const usage = "Usage: VoidDNS --config <path> [--database <path>] [--lists-database <path>] [--control-stdin]\n" ++
     "  --database: SQLite client history (default: $HOME/.config/voiddns/voiddns.sqlite3)\n" ++
+    "  --lists-database: durable list snapshots (default: <database path>.lists.sqlite3)\n" ++
     "  --control-stdin: reload, refresh <source-id>, refresh-all, save <candidate-file>, quit; EOF quits\n";
 
 const Arguments = struct {
     path: []const u8,
     control_stdin: bool,
     database: ?[]const u8 = null,
+    lists_database: ?[]const u8 = null,
 
     fn parse(args: []const []const u8) !Arguments {
         var path: ?[]const u8 = null;
         var control_stdin = false;
         var database: ?[]const u8 = null;
+        var lists_database: ?[]const u8 = null;
         var index: usize = 1;
         while (index < args.len) : (index += 1) {
             if (std.mem.eql(u8, args[index], "--config")) {
@@ -39,12 +43,16 @@ const Arguments = struct {
                 if (database != null or index + 1 >= args.len or args[index + 1].len == 0) return error.InvalidArguments;
                 index += 1;
                 database = args[index];
+            } else if (std.mem.eql(u8, args[index], "--lists-database")) {
+                if (lists_database != null or index + 1 >= args.len or args[index + 1].len == 0) return error.InvalidArguments;
+                index += 1;
+                lists_database = args[index];
             } else if (std.mem.eql(u8, args[index], "--control-stdin")) {
                 if (control_stdin) return error.InvalidArguments;
                 control_stdin = true;
             } else return error.InvalidArguments;
         }
-        return .{ .path = path orelse return error.InvalidArguments, .control_stdin = control_stdin, .database = database };
+        return .{ .path = path orelse return error.InvalidArguments, .control_stdin = control_stdin, .database = database, .lists_database = lists_database };
     }
 };
 
@@ -116,8 +124,29 @@ pub fn main(init: std.process.Init) !void {
     defer telemetry.deinit();
     try telemetry.start();
 
+    const lists_path = if (options.lists_database) |path|
+        try databasePath(allocator, path, null)
+    else
+        try std.fmt.allocPrintSentinel(allocator, "{s}.lists.sqlite3", .{database_path}, 0);
+    defer allocator.free(lists_path);
+    if (std.mem.eql(u8, lists_path, database_path)) return error.DatabasePathsMustDiffer;
+    if (std.fs.path.dirname(lists_path)) |parent| {
+        _ = try std.Io.Dir.cwd().createDirPathStatus(io, parent, if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o700) else .default_dir);
+    }
+    const new_lists = std.Io.Dir.cwd().createFile(io, lists_path, .{
+        .exclusive = true,
+        .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists => null,
+        else => return err,
+    };
+    if (new_lists) |file| file.close(io);
+    var lists_store = try ListStore.init(allocator, io, lists_path);
+    defer lists_store.deinit();
+
     var manager = try Manager.init(allocator, options.path);
     defer manager.deinit();
+    manager.lists_store = &lists_store;
     var mailbox: control.Mailbox = .{};
     defer mailbox.deinit(allocator);
     var diagnostic: config.Diagnostic = .{};

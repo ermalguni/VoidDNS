@@ -1885,7 +1885,7 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Source"
+                        "$ref": "#/components/schemas/SourceView"
                       }
                     },
                     "next_cursor": {
@@ -2099,7 +2099,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Source"
+                  "$ref": "#/components/schemas/SourceView"
                 }
               }
             }
@@ -2627,7 +2627,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Source"
+                  "$ref": "#/components/schemas/SourceView"
                 }
               }
             }
@@ -4828,6 +4828,7 @@
       },
       "Source": {
         "type": "object",
+        "description": "Editable blocklist source definition. Runtime status is response-only and is rejected in input.",
         "properties": {
           "id": {
             "type": "string",
@@ -4880,6 +4881,51 @@
           "source",
           "format"
         ],
+        "additionalProperties": false
+      },
+      "SourceHealth": {
+        "type": "object",
+        "description": "Runtime import health, never persisted into configuration JSON. Error names contain no source location.",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["disabled", "active", "degraded", "unavailable"],
+            "description": "active: fetch succeeded; degraded: fetch failed and a compatible snapshot is serving; unavailable: enabled without a compatible snapshot; disabled: not serving imported names."
+          },
+          "last_error": {
+            "type": ["string", "null"],
+            "description": "Safe error name from the latest failed import, without URLs or file paths."
+          },
+          "last_success_at_ms": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "description": "Unix epoch milliseconds of the snapshot's last successful import, or null if none."
+          },
+          "domain_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Domain membership count for this source's runtime snapshot."
+          }
+        },
+        "required": ["state", "last_error", "last_success_at_ms", "domain_count"],
+        "additionalProperties": false
+      },
+      "SourceView": {
+        "type": "object",
+        "description": "Response-only blocklist source definition and current runtime health. Use Source, without status, for writes.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Source/properties/id" },
+          "name": { "$ref": "#/components/schemas/Source/properties/name" },
+          "enabled": { "$ref": "#/components/schemas/Source/properties/enabled" },
+          "source": { "$ref": "#/components/schemas/Source/properties/source" },
+          "format": { "$ref": "#/components/schemas/Source/properties/format" },
+          "api_managed": { "$ref": "#/components/schemas/Source/properties/api_managed" },
+          "status": {
+            "$ref": "#/components/schemas/SourceHealth",
+            "readOnly": true
+          }
+        },
+        "required": ["id", "name", "enabled", "source", "format", "api_managed", "status"],
         "additionalProperties": false
       },
       "RecordInput": {

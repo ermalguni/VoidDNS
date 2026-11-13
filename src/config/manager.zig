@@ -14,6 +14,7 @@ const stringify_options: std.json.Stringify.Options = .{
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
+    lists_store: ?*@import("../lists/store.zig").Store = null,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Manager {
         return .{ .allocator = allocator, .path = try allocator.dupe(u8, path) };
@@ -28,24 +29,15 @@ pub const Manager = struct {
         return config.load(self.allocator, io, self.path, diagnostic);
     }
 
-    /// Startup alone disables failed imports and persists the resulting settings
-    /// before listeners bind. Reload and refresh retain their transactional rules.
+    /// Import durable snapshots before listeners bind without editing definitions.
     pub fn prepareStartupState(self: *Manager, io: std.Io, settings: *config.Config, diagnostic: *config.Diagnostic) !@import("../state/state.zig").State {
-        var state = try settings.prepareState(io, diagnostic);
+        var state = try settings.prepareState(io, self.lists_store, diagnostic);
         errdefer state.deinit();
-        var changed = false;
-        for (settings.definitions.sources.items) |*source| {
-            const loaded = state.lists.sources.get(source.id).?.source;
-            if (source.enabled and !loaded.enabled) {
-                source.enabled = false;
-                changed = true;
-            }
-        }
-        if (changed) {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const candidate = try config.toDocument(arena.allocator(), settings);
-            try self.save(io, &candidate, diagnostic);
+        if (self.lists_store) |store| {
+            const ids = try self.allocator.alloc([]const u8, settings.definitions.sources.items.len);
+            defer self.allocator.free(ids);
+            for (settings.definitions.sources.items, ids) |source, *id| id.* = source.id;
+            try store.reconcile(ids);
         }
         return state;
     }
@@ -333,7 +325,7 @@ test "failed atomic replacement cleans temporary and retains destination" {
     try std.testing.expect((try iterator.next(io)) == null);
 }
 
-test "startup disables failed imports durably and continues with healthy sources" {
+test "startup preserves enabled definitions across unavailable imports and recovery" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -355,6 +347,11 @@ test "startup disables failed imports durably and continues with healthy sources
     defer allocator.free(path);
     var manager = try Manager.init(allocator, path);
     defer manager.deinit();
+    const database = try std.fmt.allocPrintSentinel(allocator, "{s}.lists.sqlite3", .{path}, 0);
+    defer allocator.free(database);
+    var store = try @import("../lists/store.zig").Store.init(allocator, io, database);
+    defer store.deinit();
+    manager.lists_store = &store;
     var diagnostic: config.Diagnostic = .{};
     var settings = try manager.load(io, &diagnostic);
     defer settings.deinit();
@@ -367,17 +364,17 @@ test "startup disables failed imports durably and continues with healthy sources
     var saved = try manager.load(io, &diagnostic);
     defer saved.deinit();
     for (saved.definitions.sources.items, settings.definitions.sources.items) |persisted, active| {
-        const expected = std.mem.eql(u8, active.id, "good");
+        const expected = !std.mem.eql(u8, active.id, "off");
         try std.testing.expectEqual(expected, active.enabled);
         try std.testing.expectEqual(expected, persisted.enabled);
         try std.testing.expectEqual(expected, state.lists.sources.get(active.id).?.source.enabled);
     }
     try std.testing.expectEqualStrings("local.test", saved.records[0].name);
     try std.testing.expectEqual([4]u8{ 192, 0, 2, 1 }, saved.records[0].addresses.a[0]);
-    // Repairing a source does not silently re-enable it on the next startup.
+    // A repaired enabled source recovers automatically on the next startup.
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.txt", .data = "repaired.test\n" });
     var restarted = try manager.prepareStartupState(io, &saved, &diagnostic);
     defer restarted.deinit();
-    try std.testing.expect(!restarted.lists.contains("repaired.test"));
+    try std.testing.expect(restarted.lists.contains("repaired.test"));
     try std.testing.expect(restarted.lists.contains("healthy.test"));
 }
