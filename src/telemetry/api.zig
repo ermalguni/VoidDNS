@@ -54,7 +54,7 @@ fn read(store: *Store, a: std.mem.Allocator, request: bridge.Request) !bridge.Re
         store.queue_mutex.lockUncancelable(store.io);
         const pending = store.count;
         store.queue_mutex.unlock(store.io);
-        return reply(a, 200, .{ .writer_healthy = store.healthy.load(.monotonic), .pending_events = pending, .dropped_events_since_start = store.dropped.load(.monotonic), .last_persisted_at_ms = store.last_persisted.load(.monotonic), .retention_days = 7 });
+        return reply(a, 200, .{ .writer_healthy = store.healthy.load(.monotonic), .pending_events = pending, .dropped_events_since_start = store.dropped.load(.monotonic), .last_persisted_at_ms = store.last_persisted.load(store.io), .retention_days = 7 });
     }
     var f = try filter(a, request.query, events.now(store.io));
     const fingerprint = std.hash.Wyhash.hash(0, try std.json.Stringify.valueAlloc(a, .{ path, f.from, f.to, f.client, f.resolution, f.name, f.qtype, f.transport, f.errors }, .{}));

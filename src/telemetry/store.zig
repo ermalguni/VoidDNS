@@ -10,6 +10,47 @@ pub const schema = @embedFile("schema.sql");
 const client_sql = "INSERT INTO clients(ip_address,first_seen_at_ms,last_seen_at_ms) VALUES(?,?,?) ON CONFLICT(ip_address) DO UPDATE SET first_seen_at_ms=min(first_seen_at_ms,excluded.first_seen_at_ms),last_seen_at_ms=max(last_seen_at_ms,excluded.last_seen_at_ms)";
 const request_sql = "INSERT INTO requests(client_id,received_at_ms,domain,query_type,query_class,transport,resolution,rcode,duration_us,error) VALUES((SELECT id FROM clients WHERE ip_address=?),?,?,?,?,?,?,?,?,?)";
 
+/// ARMv7 generic targets support at most 32-bit atomics. Saturating keeps a
+/// prolonged loss incident from wrapping back to zero without taking a lock
+/// on the DNS path. The API still exposes an integer, capped at 4,294,967,295.
+const DropCounter = struct {
+    value: std.atomic.Value(u32) = .init(0),
+
+    pub fn load(self: *const DropCounter, comptime order: std.builtin.AtomicOrder) u64 {
+        return self.value.load(order);
+    }
+
+    pub fn fetchAdd(self: *DropCounter, amount: usize, comptime order: std.builtin.AtomicOrder) u64 {
+        const increment: u32 = @intCast(@min(amount, std.math.maxInt(u32)));
+        var previous = self.value.load(.monotonic);
+        while (previous != std.math.maxInt(u32)) {
+            if (self.value.cmpxchgWeak(previous, previous +| increment, order, .monotonic)) |observed| {
+                previous = observed;
+            } else return previous;
+        }
+        return previous;
+    }
+};
+
+/// Preserve full Unix milliseconds on 32-bit targets. Only the background
+/// writer and health API use this mutex; DNS producers never acquire it.
+const PersistedTime = struct {
+    mutex: std.Io.Mutex = .init,
+    value: i64 = 0,
+
+    pub fn load(self: *PersistedTime, io: std.Io) i64 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.value;
+    }
+
+    fn store(self: *PersistedTime, io: std.Io, value: i64) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.value = value;
+    }
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -21,9 +62,9 @@ pub const Store = struct {
     queue: [queue_capacity]Event = undefined,
     head: usize = 0,
     count: usize = 0,
-    dropped: std.atomic.Value(u64) = .init(0),
+    dropped: DropCounter = .{},
     healthy: std.atomic.Value(bool) = .init(true),
-    last_persisted: std.atomic.Value(i64) = .init(0),
+    last_persisted: PersistedTime = .{},
     future: ?std.Io.Future(void) = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !*Store {
@@ -114,7 +155,7 @@ pub const Store = struct {
             return true;
         };
         self.healthy.store(true, .monotonic);
-        self.last_persisted.store(events.now(self.io), .monotonic);
+        self.last_persisted.store(self.io, events.now(self.io));
         return true;
     }
 
@@ -153,3 +194,22 @@ pub const Store = struct {
         return self.writer.rowsAffected() != 0;
     }
 };
+
+test "drop counter uses 32-bit atomics and saturates without wrapping" {
+    var counter: DropCounter = .{};
+    try std.testing.expectEqual(@as(u64, 0), counter.fetchAdd(1, .monotonic));
+    try std.testing.expectEqual(@as(u64, 1), counter.load(.monotonic));
+    counter.value.store(std.math.maxInt(u32) - 1, .monotonic);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32) - 1), counter.fetchAdd(batch_size, .monotonic));
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), counter.load(.monotonic));
+    _ = counter.fetchAdd(1, .monotonic);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), counter.load(.monotonic));
+}
+
+test "persistence timestamp retains milliseconds beyond 32 bits" {
+    var timestamp: PersistedTime = .{};
+    try std.testing.expectEqual(@as(i64, 0), timestamp.load(std.testing.io));
+    const now: i64 = 1_800_000_000_123;
+    timestamp.store(std.testing.io, now);
+    try std.testing.expectEqual(now, timestamp.load(std.testing.io));
+}

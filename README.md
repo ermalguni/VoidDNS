@@ -1062,7 +1062,10 @@ submission/write using a monotonic clock. Receive timestamps use Unix millisecon
 DNS submits to a preallocated 4096-event queue without allocation, database I/O,
 or waiting for queue locks. A writer drains batches of up to 256, polling every
 250 ms when idle. Queue overflow/contention and failed transactions drop events
-and increment a process-local loss counter. DNS remains available during runtime
+and increment a process-local loss counter, which saturates at 4,294,967,295
+instead of wrapping. Its atomics are 32-bit for ARMv7 compatibility; the full
+64-bit last-persistence timestamp uses a mutex outside the DNS path.
+DNS remains available during runtime
 database failures. Graceful shutdown joins producers and HTTP handlers before
 draining; a crash can lose queued events.
 
