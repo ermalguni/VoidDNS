@@ -65,19 +65,199 @@
         "format": "domains"
       },
       {
-        "id": "first-blocklist",
-        "name": "HaGeZi Multi PRO mini",
+        "id": "hagezi-pro",
+        "name": "HaGeZi Multi PRO",
         "enabled": true,
         "source": {
           "kind": "url",
-          "value": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt"
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/pro.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-tif",
+        "name": "HaGeZi Threat Intelligence Feeds",
+        "enabled": true,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/tif.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-light",
+        "name": "HaGeZi Multi LIGHT",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/light.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-normal",
+        "name": "HaGeZi Multi NORMAL",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/multi.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-pro-plus",
+        "name": "HaGeZi Multi PRO++",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/pro.plus.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-ultimate",
+        "name": "HaGeZi Multi ULTIMATE",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/ultimate.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-doh",
+        "name": "HaGeZi DoH-only blocking",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/doh.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-amazon",
+        "name": "HaGeZi Native Tracker Amazon",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.amazon.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-apple",
+        "name": "HaGeZi Native Tracker Apple",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.apple.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-huawei",
+        "name": "HaGeZi Native Tracker Huawei",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.huawei.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-winoffice",
+        "name": "HaGeZi Native Tracker Windows and Office",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.winoffice.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-samsung",
+        "name": "HaGeZi Native Tracker Samsung",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.samsung.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-tiktok",
+        "name": "HaGeZi Native Tracker TikTok",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.tiktok.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-tiktok-extended",
+        "name": "HaGeZi Native Tracker TikTok extended",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.tiktok.extended.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-lgwebos",
+        "name": "HaGeZi Native Tracker LG webOS",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.lgwebos.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-roku",
+        "name": "HaGeZi Native Tracker Roku",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.roku.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-vivo",
+        "name": "HaGeZi Native Tracker Vivo",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.vivo.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-oppo-realme",
+        "name": "HaGeZi Native Tracker OPPO and Realme",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.oppo-realme.txt"
+        },
+        "format": "domains"
+      },
+      {
+        "id": "hagezi-native-xiaomi",
+        "name": "HaGeZi Native Tracker Xiaomi",
+        "enabled": false,
+        "source": {
+          "kind": "url",
+          "value": "https://raw.githubusercontent.com/hagezi/dns-blocklists-legacy/main/domains/native.xiaomi.txt"
         },
         "format": "domains"
       },
       {
         "id": "firebog-adguard",
         "name": "AdGuard DNS (Firebog)",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://v.firebog.net/hosts/AdguardDNS.txt"
@@ -87,7 +267,7 @@
       {
         "id": "firebog-admiral",
         "name": "Admiral (Firebog)",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://v.firebog.net/hosts/Admiral.txt"
@@ -97,7 +277,7 @@
       {
         "id": "firebog-easylist",
         "name": "EasyList (Firebog)",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://v.firebog.net/hosts/Easylist.txt"
@@ -107,7 +287,7 @@
       {
         "id": "firebog-easyprivacy",
         "name": "EasyPrivacy (Firebog)",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://v.firebog.net/hosts/Easyprivacy.txt"
@@ -117,7 +297,7 @@
       {
         "id": "firebog-prigent-ads",
         "name": "Prigent Ads (Firebog)",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://v.firebog.net/hosts/Prigent-Ads.txt"
@@ -157,7 +337,7 @@
       {
         "id": "matomo-referrer-spam",
         "name": "Matomo referrer spam",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://raw.githubusercontent.com/matomo-org/referrer-spam-blacklist/master/spammers.txt"
@@ -167,7 +347,7 @@
       {
         "id": "phishing-army",
         "name": "Phishing Army extended",
-        "enabled": true,
+        "enabled": false,
         "source": {
           "kind": "url",
           "value": "https://phishing.army/download/phishing_army_blocklist_extended.txt"

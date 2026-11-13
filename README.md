@@ -543,33 +543,57 @@ zig build run -- --config examples/voiddns.json
 ```
 
 [`examples/voiddns.json`](examples/voiddns.json) includes both startup settings and
-filtering definitions. It keeps the file-backed `example-domains` list and adds
-`first-blocklist`, [HaGeZi Multi PRO mini](https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt)
-in plain-domain format. Despite the source URL's `/wildcard/` directory, VoidDNS
-matches these names exactly; it does not infer subdomain blocking.
-The example also includes selected advertising, tracking, and security feeds
-from [netguide.io's Blocklists for Pi-hole](https://netguide.io/en/blocklists-for-pihole/):
+filtering definitions. The file-backed `example-domains` list remains enabled.
+Remote protection defaults to [HaGeZi Multi PRO and Threat Intelligence Feeds
+(TIF)](https://github.com/hagezi/dns-blocklists). The example uses the
+[legacy plain-domain lists](https://github.com/hagezi/dns-blocklists-legacy),
+which enumerate known subdomains for exact-match tools. HaGeZi's main
+`wildcard/*-onlydomains.txt` files are parseable, but expect suffix matching;
+using them with VoidDNS misses their intended subdomain coverage. Even the
+expanded legacy lists cannot cover arbitrary or newly generated subdomains.
+The example downloads these lists directly from GitHub; jsDelivr can reject
+uncached files when the legacy repository exceeds its package-size limit.
 
 | Source IDs | Purpose | Enabled |
 | --- | --- | --- |
-| `firebog-adguard`, `firebog-admiral`, `firebog-easylist` | Advertising | Yes |
-| `firebog-easyprivacy`, `firebog-prigent-ads` | Tracking and advertising | Yes |
-| `matomo-referrer-spam` | Referrer spam | Yes |
-| `phishing-army` | Phishing Army extended | Yes |
-| `perflyst-android`, `perflyst-smarttv`, `perflyst-firetv` | Device tracking | No; opt in for relevant devices |
+| `hagezi-pro` | Balanced advertising and tracking protection | Yes |
+| `hagezi-tif` | Additional malware, phishing, and other threat coverage | Yes |
+| `hagezi-light`, `hagezi-normal` | Less aggressive Multi alternatives | No |
+| `hagezi-pro-plus`, `hagezi-ultimate` | More aggressive Multi alternatives | No |
+| `hagezi-native-*` | Twelve device/app tracker options across eleven vendors | No; opt in for relevant devices |
+| `hagezi-doh` | DoH-only blocking | No; opt-in network policy |
+| `firebog-adguard`, `firebog-admiral`, `firebog-easylist` | Existing advertising alternatives | No |
+| `firebog-easyprivacy`, `firebog-prigent-ads` | Existing tracking and advertising alternatives | No |
+| `matomo-referrer-spam`, `phishing-army` | Existing spam and phishing alternatives | No |
+| `perflyst-android`, `perflyst-smarttv`, `perflyst-firetv` | Existing device tracking alternatives | No |
 
-All ten added URLs were downloaded and their complete contents passed VoidDNS's
-strict domain parser when added. This is a compatible selection, not a copy of
-every list on that page: remote hosts files, Adblock rules, and regex entries
-are not supported URL imports. Content-category and whole-service blocking
-lists were not selected. Device lists are disabled by default because they can
-affect device features; enable them individually after reviewing their contents.
+Enable exactly one Multi tier: Light, Normal, PRO, PRO++, or ULTIMATE. These
+tiers build on each other; stacking them adds redundant downloads and membership
+storage. TIF adds coverage beyond every Multi tier. More aggressive tiers and
+native tracker lists can affect legitimate features. The two TikTok native
+variants are alternatives; choose one. DoH blocking does not prevent bypass by
+direct IP or enforce a firewall policy.
 
-The example downloads its enabled URL sources at startup. These feeds can overlap
-with HaGeZi and each other, increasing download time and RAM usage. Failed imports
+Only compatible legacy domain-list variants are included in the HaGeZi catalog.
+Mini variants and specialty content filters are omitted because equivalent
+expanded legacy lists are unavailable. Imported allowlists, IP lists, Adblock
+rules, and suffix/TLD policies are not supported by the current importer and
+exact-name policy.
+
+Each source is limited to 32 MiB after decompression. PRO and TIF measured about
+12.6 MiB and 26.5 MiB respectively when selected on 2026-11-13; future versions
+may exceed the limit. Download sizes do not describe RAM consumption or peak
+refresh usage; measure those separately for the target machine.
+
+The example downloads its enabled URL sources at startup. Disabled sources are
+not downloaded. Additional feeds can overlap with HaGeZi and each other,
+increasing download time and RAM usage. Failed imports
 are logged and persistently disabled; upstream contents can change after validation.
 Re-enable a source explicitly after fixing it. Disable unwanted sources rather than
 assuming all Pi-hole lists are compatible. Matching remains exact for these feeds.
+Use an explicit refresh to update imported contents; an ordinary reload preserves
+snapshots whose source definitions have not changed. No automatic refresh scheduler
+is implemented.
 
 The file is authoritative, not a seed merged with another store. Apply changes
 through the explicit reload channel above or restart. Omit `blocks` and `allows`
