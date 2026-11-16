@@ -171,6 +171,15 @@ pub const Management = struct {
         if (job.failure == null) self.publish(job) catch |err| {
             job.failure = err;
         };
+        if (job.kind == .refresh) {
+            self.state.mutex.lockUncancelable(self.io);
+            self.state.lists.finishRefresh(self.io, job.selection, job.failure, self.settings.blocklist_refresh);
+            self.state.mutex.unlock(self.io);
+        } else if (job.failure == null) {
+            self.state.mutex.lockUncancelable(self.io);
+            self.state.lists.initializeSchedules(self.io, self.settings.blocklist_refresh);
+            self.state.mutex.unlock(self.io);
+        }
         // Failure results are published management state too, including a save
         // that changed disk without changing the active DNS configuration.
         if (job.failure != null) self.revision += 1;
@@ -252,6 +261,16 @@ pub const Management = struct {
         self.next_operation += 1;
         self.job = job;
         errdefer self.job = null;
+        if (job.kind == .refresh) {
+            self.state.mutex.lockUncancelable(self.io);
+            self.state.lists.beginRefresh(self.io, job.selection);
+            self.state.mutex.unlock(self.io);
+        }
+        errdefer if (job.kind == .refresh) {
+            self.state.mutex.lockUncancelable(self.io);
+            self.state.lists.finishRefresh(self.io, job.selection, error.ConcurrencyUnavailable, self.settings.blocklist_refresh);
+            self.state.mutex.unlock(self.io);
+        };
         job.future = try self.io.concurrent(Job.run, .{job});
         return job.id;
     }
@@ -260,6 +279,19 @@ pub const Management = struct {
         const job = try self.allocator.create(Job);
         job.* = .{ .owner = self, .id = 0, .kind = kind };
         return job;
+    }
+
+    /// Main-only admission. Due work stays coalesced while another writer runs.
+    pub fn scheduledRefresh(self: *Management) !void {
+        if (self.quit_requested or self.job != null or self.pending_count != 0) return;
+        const id = self.state.lists.nextDue(self.io) orelse return;
+        const job = try self.newJob(.refresh);
+        job.api = false;
+        job.selection = .{ .one = self.allocator.dupe(u8, id) catch |err| {
+            job.deinit();
+            return err;
+        } };
+        _ = try self.launch(job);
     }
 
     pub fn stdin(self: *Management, request: control.Request) !void {
@@ -811,10 +843,14 @@ test "management policy matches record family and collections enforce revision c
         \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"127.0.0.1"}]},"blocks":{"lists":[{"id":"unread","source":{"kind":"file","value":"does-not-exist"},"format":"domains"}]}}
     ;
     try std.testing.expectEqual(@as(u16, 200), (try management.handle(a, request)).status);
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{ .sub_path = "list.txt", .data = "disabled.test\n" });
+    const list_path = try temporary.dir.realPathFileAlloc(io, "list.txt", a);
     try state.lists.add(io, .{
         .id = "refresh",
         .enabled = false,
-        .source = .{ .kind = .file, .value = "not-read" },
+        .source = .{ .kind = .file, .value = list_path },
         .format = .domains,
     }, ".");
     request.path = "/api/v1/blocklists/refresh";
@@ -825,10 +861,15 @@ test "management policy matches record family and collections enforce revision c
     try settings.definitions.sources.append(allocator, try state.lists.sources.get("refresh").?.source.clone(allocator));
     const source_response = try management.handle(a, request);
     try std.testing.expectEqual(@as(u16, 200), source_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, source_response.body, "\"status\":{\"state\":\"disabled\",\"last_error\":null,\"last_success_at_ms\":null,\"domain_count\":0}") != null);
+    const source_view = try std.json.parseFromSlice(SourceView, a, source_response.body, .{});
+    defer source_view.deinit();
+    try std.testing.expect(!source_view.value.enabled);
+    try std.testing.expectEqual(.active, source_view.value.status.state);
+    try std.testing.expectEqual(@as(usize, 0), source_view.value.status.active_domain_count);
+    try std.testing.expectEqual(@as(usize, 1), source_view.value.status.snapshot_domain_count);
     request.path = "/api/v1/blocklists";
     const source_collection = try management.handle(a, request);
-    try std.testing.expect(std.mem.indexOf(u8, source_collection.body, "\"status\":{\"state\":\"disabled\"") != null);
+    try std.testing.expectEqual(@as(u16, 200), source_collection.status);
     request.path = "/api/v1/blocklists/refresh/refresh";
     request.method = "POST";
     request.if_match = "\"2\"";

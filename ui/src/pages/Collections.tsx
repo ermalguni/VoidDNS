@@ -5,7 +5,7 @@ import { useForm } from '@mantine/form';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { DomainLink } from '../DomainInspection';
-import { ApiError, useApi, useWrite } from '../api';
+import { ApiError, RawJson, useApi, useWrite } from '../api';
 import type { Schema } from '../api';
 import { ErrorNotice, PageHeading } from '../components';
 
@@ -16,8 +16,8 @@ type SourceView = Schema<'SourceView'>;
 type Resource = Domain | RecordSet | SourceView;
 type Kind = 'domains' | 'records' | 'blocklists';
 type Page<T> = { items: T[]; next_cursor: string | null; revision: number };
-type Snapshot = { data: Resource | Page<Resource>; etag: string };
-type Selection = { action: 'create' | 'edit' | 'delete' | 'refresh' | 'refresh-all'; id?: string };
+type Snapshot = { data: Resource | Page<Resource> | Schema<'Config'>; etag: string; raw: string };
+type Selection = { action: 'create' | 'edit' | 'delete' | 'refresh' | 'refresh-all' | 'global-refresh'; id?: string };
 type FormProps<T> = { initial?: T; disabled: boolean; busy: boolean; onSubmit: (body: unknown) => Promise<void> };
 
 const labels = {
@@ -27,7 +27,6 @@ const labels = {
 };
 
 const sourceStates = {
-  disabled: { label: 'Disabled', color: 'gray' },
   active: { label: 'Active', color: 'teal' },
   degraded: { label: 'Degraded', color: 'yellow' },
   unavailable: { label: 'Unavailable', color: 'red' },
@@ -104,6 +103,31 @@ function RecordForm({ initial, disabled, busy, onSubmit }: FormProps<RecordSet>)
   );
 }
 
+const refreshFields = [
+  { key: 'interval_seconds', label: 'Interval (seconds)', fallback: 86400, min: 1, max: 4294967295 },
+  { key: 'jitter_percent', label: 'Jitter (%)', fallback: 10, min: 0, max: 100 },
+  { key: 'retry_initial_seconds', label: 'Initial retry (seconds)', fallback: 300, min: 1, max: 4294967295 },
+  { key: 'retry_max_seconds', label: 'Maximum retry (seconds)', fallback: 21600, min: 1, max: 4294967295 },
+] as const;
+
+export function importTime(value: number | null) {
+  return value === null ? 'None' : new Date(value).toLocaleString();
+}
+
+export function SourceImportStatus({ source }: { source: SourceView }) {
+  const status = source.status;
+  const state = sourceStates[status.state];
+  return <Stack gap={2}>
+    <Group gap="xs"><Badge variant="light" color={source.enabled ? 'blue' : 'gray'}>{source.enabled ? 'Enabled' : 'Disabled'}</Badge><Badge variant="light" color={state.color}>Import: {state.label}</Badge>{status.refreshing ? <Badge variant="light">Refreshing</Badge> : null}</Group>
+    <Text size="xs">{status.active_domain_count.toLocaleString()} active / {status.snapshot_domain_count.toLocaleString()} snapshot domains</Text>
+    <Text size="xs" c="dimmed">Last attempt: {importTime(status.last_attempt_at_ms)}</Text>
+    <Text size="xs" c="dimmed">Last completed: {importTime(status.last_completed_at_ms)}</Text>
+    <Text size="xs" c="dimmed">Last success: {importTime(status.last_success_at_ms)}</Text>
+    <Text size="xs" c="dimmed">Next refresh: {importTime(status.next_refresh_at_ms)} · Consecutive failures: {status.consecutive_failures}</Text>
+    {status.last_error !== null ? <Text size="xs" c={status.state === 'unavailable' ? 'red' : 'yellow'} style={{ overflowWrap: 'anywhere' }}>Last error: {status.last_error}</Text> : null}
+  </Stack>;
+}
+
 function SourceForm({ initial, disabled, busy, onSubmit }: FormProps<Source>) {
   const form = useForm({
     initialValues: { id: initial?.id ?? '', name: initial?.name ?? '', enabled: initial?.enabled ?? true, kind: initial?.source.kind ?? 'url', value: initial?.source.value ?? '', format: initial?.format ?? 'domains' },
@@ -134,11 +158,75 @@ function SourceForm({ initial, disabled, busy, onSubmit }: FormProps<Source>) {
         <Select label="Source kind" required allowDeselect={false} data={[{ value: 'url', label: 'HTTP / HTTPS URL' }, { value: 'file', label: 'Local file' }]} value={form.values.kind} disabled={busy} onChange={(value) => { if (value === 'url' || value === 'file') { form.setFieldValue('kind', value); if (value === 'url') form.setFieldValue('format', 'domains'); } }} />
         <TextInput label={form.values.kind === 'url' ? 'Source URL' : 'File path'} required description={form.values.kind === 'url' ? 'Public HTTP/HTTPS destination. Redirects are rejected.' : 'New or changed files must be relative to the server’s configured api.file_root.'} placeholder={form.values.kind === 'url' ? 'https://example.com/domains.txt' : 'lists/domains.txt'} disabled={busy} {...form.getInputProps('value')} />
         <Select label="Format" required allowDeselect={false} data={form.values.kind === 'url' ? [{ value: 'domains', label: 'Domain list' }] : [{ value: 'domains', label: 'Domain list' }, { value: 'hosts', label: 'Hosts file' }]} disabled={busy} {...form.getInputProps('format')} />
-        <Text size="sm" c="dimmed">Saving an enabled new or content-changed source loads its contents. Metadata-only edits preserve unchanged operator-owned locations. Provenance is managed by the server.</Text>
+        <Text size="sm" c="dimmed">All sources use the global refresh settings on the Blocklists page, including disabled sources. Saving metadata does not fetch contents. New or content-changed sources import even when disabled, updating saved snapshots without contributing DNS rules.</Text>
         <Button type="submit" disabled={disabled} loading={busy}>{initial ? 'Save source' : 'Create source'}</Button>
       </Stack>
     </form>
   );
+}
+
+function RefreshPolicyForm({ initial, disabled, busy, onSubmit }: FormProps<Schema<'Config'>>) {
+  const policy = initial?.blocks?.refresh;
+  const form = useForm({
+    initialValues: {
+      enabled: policy?.enabled ?? true,
+      interval_seconds: policy?.interval_seconds ?? 86400,
+      jitter_percent: policy?.jitter_percent ?? 10,
+      retry_initial_seconds: policy?.retry_initial_seconds ?? 300,
+      retry_max_seconds: policy?.retry_max_seconds ?? 21600,
+    },
+    validate: (values) => {
+      const errors: Record<string, string> = {};
+      for (const field of refreshFields) {
+        const value = values[field.key];
+        if (!Number.isInteger(value) || value < field.min || value > field.max) errors[field.key] = `Enter an integer from ${field.min} to ${field.max}.`;
+      }
+      if (values.retry_max_seconds < values.retry_initial_seconds) errors.retry_max_seconds = 'Maximum retry must be at least the initial retry.';
+      return errors;
+    },
+  });
+  return <form onSubmit={form.onSubmit(onSubmit)}><Stack>
+    <Text size="sm">One global policy applies to every blocklist. Disabled lists still import and save snapshots, but never contribute active DNS memberships. Turning scheduling off does not disable manual refresh or startup imports.</Text>
+    <Switch label="Enable scheduled refresh for all lists" disabled={busy} {...form.getInputProps('enabled', { type: 'checkbox' })} />
+    {refreshFields.map(field => <NumberInput key={field.key} label={field.label} description={`Default: ${field.fallback}`} required min={field.min} max={field.max} allowDecimal={false} disabled={busy} {...form.getInputProps(field.key)} />)}
+    <Text size="sm" c="dimmed">Saves only the global refresh policy within the viewed configuration, preserving every other setting and collection. Schedule changes do not fetch source contents.</Text>
+    <Button type="submit" disabled={disabled} loading={busy}>Save global refresh settings</Button>
+  </Stack></form>;
+}
+
+function withRefreshPolicy(raw: string, policy: unknown): RawJson {
+  // Replace only blocks.refresh in the raw document so unrelated usize values
+  // retain their exact integer tokens rather than rounding through JavaScript.
+  function replaceMember(text: string, path: string[], value: string): string {
+    const tokens = Array.from(text.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:]+/g));
+    let depth = 0;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index][0];
+      if (depth === 1 && token.startsWith('"') && tokens[index + 1]?.[0] === ':' && JSON.parse(token) === path[0]) {
+        const start = index + 2;
+        let end = start;
+        if (tokens[start][0] === '{' || tokens[start][0] === '[') {
+          let nested = 0;
+          do {
+            if (tokens[end][0] === '{' || tokens[end][0] === '[') nested++;
+            else if (tokens[end][0] === '}' || tokens[end][0] === ']') nested--;
+            end++;
+          } while (nested > 0);
+          end--;
+        }
+        const from = tokens[start].index!;
+        const to = tokens[end].index! + tokens[end][0].length;
+        const replacement = path.length === 1 ? value : replaceMember(text.slice(from, to), path.slice(1), value);
+        return text.slice(0, from) + replacement + text.slice(to);
+      }
+      if (token === '{' || token === '[') depth++;
+      else if (token === '}' || token === ']') depth--;
+    }
+    const closing = tokens[tokens.length - 1].index!;
+    const replacement = path.length === 1 ? value : replaceMember('{}', path.slice(1), value);
+    return `${text.slice(0, closing)}${tokens.length > 2 ? ',' : ''}${JSON.stringify(path[0])}:${replacement}${text.slice(closing)}`;
+  }
+  return new RawJson(replaceMember(raw, ['blocks', 'refresh'], JSON.stringify(policy)));
 }
 
 function SnapshotReview({ snapshot }: { snapshot: Snapshot }) {
@@ -147,7 +235,7 @@ function SnapshotReview({ snapshot }: { snapshot: Snapshot }) {
       <Text size="sm" fw={600}>Active state · revision {snapshot.etag}</Text>
       {'items' in snapshot.data ? <Text size="xs" c="dimmed">Showing the first {snapshot.data.items.length} current entries{snapshot.data.next_cursor ? '; more entries exist' : ''}. Your draft has not been changed.</Text> : null}
       <ScrollArea.Autosize mah={260} type="auto">
-        <Code block style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(snapshot.data, null, 2)}</Code>
+        <Code block style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{'schema_version' in snapshot.data ? snapshot.raw : JSON.stringify(snapshot.data, null, 2)}</Code>
       </ScrollArea.Autosize>
     </Stack>
   );
@@ -156,10 +244,11 @@ function SnapshotReview({ snapshot }: { snapshot: Snapshot }) {
 export function ResourceEditor({ kind, selection, onClose, onComplete, prefill }: { kind: Kind; selection: Selection; onClose: () => void; onComplete: () => void; prefill?: { domain: string; action: 'allow' | 'block' } }) {
   const api = useApi();
   const writer = useWrite();
-  const collectionPath = `/${kind}`;
+  const globalRefresh = selection.action === 'global-refresh';
+  const collectionPath = globalRefresh ? '/config' : `/${kind}`;
   const itemPath = selection.id === undefined ? collectionPath : `${collectionPath}/${encodeURIComponent(selection.id)}`;
-  const readPath = selection.id === undefined ? `${collectionPath}?limit=100` : itemPath;
-  const query = useQuery({ queryKey: [collectionPath, readPath, 'editor'], queryFn: ({ signal }) => api.read<Resource | Page<Resource>>(readPath, signal), retry: false, refetchOnMount: 'always', refetchOnWindowFocus: false });
+  const readPath = globalRefresh ? collectionPath : selection.id === undefined ? `${collectionPath}?limit=100` : itemPath;
+  const query = useQuery({ queryKey: [collectionPath, readPath, 'editor'], queryFn: ({ signal }) => api.read<Snapshot['data']>(readPath, signal), retry: false, refetchOnMount: 'always', refetchOnWindowFocus: false });
   const [baseline, setBaseline] = useState<Snapshot | null>(null);
   const [writeError, setWriteError] = useState<unknown>(null);
   const [needsReview, setNeedsReview] = useState(false);
@@ -183,9 +272,9 @@ export function ResourceEditor({ kind, selection, onClose, onComplete, prefill }
     setWriteError(null);
     const action = selection.action;
     const path = action === 'refresh-all' ? `${collectionPath}/refresh` : action === 'refresh' ? `${itemPath}/refresh` : itemPath;
-    const method = action === 'delete' ? 'DELETE' : action === 'edit' ? 'PUT' : 'POST';
+    const method = action === 'delete' ? 'DELETE' : action === 'edit' || globalRefresh ? 'PUT' : 'POST';
     try {
-      await writer.submit(path, method, body, baseline.etag);
+      await writer.submit(path, method, globalRefresh ? withRefreshPolicy(baseline.raw, body) : body, baseline.etag);
       onComplete();
     } catch (error) {
       setWriteError(error);
@@ -194,18 +283,19 @@ export function ResourceEditor({ kind, selection, onClose, onComplete, prefill }
     }
   }
 
-  const editing = selection.action === 'edit';
+  const editing = selection.action === 'edit' || globalRefresh;
   const creating = selection.action === 'create';
   const deleting = selection.action === 'delete';
   const refreshingAll = selection.action === 'refresh-all';
-  const title = `${creating ? 'Create' : editing ? 'Edit' : deleting ? 'Delete' : 'Refresh'} ${refreshingAll ? 'all enabled sources' : labels[kind].singular}`;
+  const title = globalRefresh ? 'Global refresh settings' : `${creating ? 'Create' : editing ? 'Edit' : deleting ? 'Delete' : 'Refresh'} ${refreshingAll ? 'all sources' : labels[kind].singular}`;
   const initial = baseline && !('items' in baseline.data) ? baseline.data : undefined;
   const disabled = needsReview || writer.busy;
   let form: ReactNode = null;
   if (baseline && (creating || editing)) {
     if (kind === 'domains') form = <DomainForm initial={initial as Domain | undefined} prefill={creating ? prefill : undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
     if (kind === 'records') form = <RecordForm initial={initial as RecordSet | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
-    if (kind === 'blocklists') form = <SourceForm initial={initial as Source | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
+    if (globalRefresh) form = <RefreshPolicyForm initial={initial as Schema<'Config'> | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
+    else if (kind === 'blocklists') form = <SourceForm initial={initial as Source | undefined} disabled={disabled} busy={writer.busy} onSubmit={submit} />;
   }
   return (
     <Drawer opened onClose={() => { if (!writer.busy) onClose(); }} title={<Title order={3}>{title}</Title>} size="lg" position="right" closeOnClickOutside={!writer.busy} closeOnEscape={!writer.busy} withCloseButton={!writer.busy}>
@@ -229,9 +319,9 @@ export function ResourceEditor({ kind, selection, onClose, onComplete, prefill }
           <Stack>
             <SnapshotReview snapshot={baseline} />
             <Alert color={deleting ? 'red' : 'teal'} title={deleting ? 'Confirm deletion' : 'Refresh active definitions'}>
-              {deleting ? (kind === 'records' ? 'This removes the entire local record set. An unexpired upstream cache answer may become visible.' : kind === 'blocklists' ? 'This removes the source definition and its saved and live imported memberships. Names supplied by other sources remain blocked.' : 'This removes the explicit rule and may change how this exact name resolves.') : refreshingAll ? 'Fetch every enabled source, then publish prepared updates together. Failed fetches use compatible saved snapshots; sources without one remain unavailable. Unapplied disk edits are not used.' : 'Fetch this source using its active definition. A failed fetch uses a compatible saved snapshot, or leaves the source unavailable if none exists. A disabled source refresh is a no-op.'}
+              {deleting ? (kind === 'records' ? 'This removes the entire local record set. An unexpired upstream cache answer may become visible.' : kind === 'blocklists' ? 'This removes the source definition and its saved and live imported memberships. Names supplied by other sources remain blocked.' : 'This removes the explicit rule and may change how this exact name resolves.') : refreshingAll ? 'Fetch every source, including disabled sources, regardless of whether global scheduling is enabled, then publish prepared updates together. Failed imports retain compatible last-known-good data indefinitely and schedule retries when global scheduling is enabled. Unapplied disk edits are not used.' : 'Fetch this source using its active definition, even when disabled or global scheduling is off. Failed imports retain compatible last-known-good data indefinitely. Disabled sources update saved contents without contributing DNS rules.'}
             </Alert>
-            <Button color={deleting ? 'red' : 'teal'} disabled={disabled} loading={writer.busy} onClick={() => void submit(undefined)}>{deleting ? 'Confirm delete' : refreshingAll ? 'Refresh all enabled sources' : 'Refresh source'}</Button>
+            <Button color={deleting ? 'red' : 'teal'} disabled={disabled} loading={writer.busy} onClick={() => void submit(undefined)}>{deleting ? 'Confirm delete' : refreshingAll ? 'Refresh all sources' : 'Refresh source'}</Button>
           </Stack>
         ) : null}
         {baseline ? <Text size="xs" c="dimmed">Write precondition: revision {baseline.etag}. Saved and active are confirmed only after the operation completes.</Text> : null}
@@ -251,18 +341,10 @@ function ResourceCells({ kind, item }: { kind: Kind; item: Resource }) {
     return <><Table.Td><DomainLink domain={record.name} type={record.type === 'A' ? 1 : 28} /></Table.Td><Table.Td><Badge variant="light" color="gray">{record.type}</Badge></Table.Td><Table.Td><Stack gap={2}>{record.addresses.map((address) => <Text key={address} size="sm" style={{ overflowWrap: 'anywhere' }}>{address}</Text>)}</Stack></Table.Td><Table.Td>{record.ttl}s</Table.Td></>;
   }
   const source = item as SourceView;
-  const status = source.status;
-  const state = sourceStates[status.state];
   return <>
     <Table.Td><Link to={`/blocklists/${encodeURIComponent(source.id)}`}>{source.name || source.id}</Link>{source.name ? <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{source.id}</Text> : null}<Text size="sm" mt={4}><Link to={`/blocklists/${encodeURIComponent(source.id)}`}>View domains</Link></Text></Table.Td>
     <Table.Td>
-      <Stack gap={2}>
-        <Badge variant="light" color={state.color}>{state.label}</Badge>
-        {status.state === 'degraded' ? <Text size="xs">Serving a saved snapshot</Text> : status.state === 'unavailable' ? <Text size="xs">Enabled, no compatible snapshot</Text> : null}
-        <Text size="xs">{status.domain_count.toLocaleString()} {status.domain_count === 1 ? 'domain' : 'domains'}</Text>
-        <Text size="xs" c="dimmed">Last successful import: {status.last_success_at_ms === null ? 'Never' : new Date(status.last_success_at_ms).toLocaleString()}</Text>
-        {status.last_error !== null ? <Text size="xs" c={status.state === 'unavailable' ? 'red' : 'yellow'} style={{ overflowWrap: 'anywhere' }}>Last error: {status.last_error}</Text> : null}
-      </Stack>
+      <SourceImportStatus source={source} />
     </Table.Td>
     <Table.Td><Text size="sm" style={{ overflowWrap: 'anywhere' }}>{source.source.value}</Text><Text size="xs" c="dimmed">{source.source.kind} · {source.format} · {source.api_managed ? 'API-managed' : 'Operator-provided'}</Text></Table.Td>
   </>;
@@ -298,7 +380,7 @@ function CollectionPage({ kind }: { kind: Kind }) {
   if (kind === 'domains' && filters.action) params.set('action', filters.action);
   if (kind === 'domains' && filters.domain) params.set('domain', filters.domain);
   const path = `${route}?${params.toString()}`;
-  const query = useQuery({ queryKey: [route, path], queryFn: ({ signal }) => api.read<Page<Resource>>(path, signal), retry: false });
+  const query = useQuery({ queryKey: [route, path], queryFn: ({ signal }) => api.read<Page<Resource>>(path, signal), retry: false, refetchInterval: kind === 'blocklists' && !cursor ? 5000 : false });
   const staleCursor = query.error instanceof ApiError && query.error.status === 409 && (query.error.code === 'StaleCursor' || query.error.message === 'StaleCursor');
 
   useEffect(() => {
@@ -327,6 +409,7 @@ function CollectionPage({ kind }: { kind: Kind }) {
         </Group>
         <Button variant="default" loading={query.isFetching} onClick={reload}>Reload listing</Button>
       </Group>
+      {kind === 'blocklists' ? <section aria-label="Global refresh settings"><Group gap="sm"><Button variant="default" onClick={() => setSelection({ action: 'global-refresh' })}>Global refresh settings</Button><Text size="sm" c="dimmed">Applies to all lists, including imports for disabled lists.</Text></Group></section> : null}
       <Paper withBorder p="md">
         <form onSubmit={filterForm.onSubmit((values) => { updateListing({ action: values.action, domain: values.domain, limit: Number(values.limit) }); setRestarted(false); })}>
           <Group align="start" gap="sm">

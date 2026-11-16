@@ -5,6 +5,7 @@ const definitions_module = @import("definitions.zig");
 const document_module = @import("document.zig");
 const Record = @import("../domains/record.zig");
 const domain = @import("../domains/domain.zig");
+const RefreshPolicy = @import("../blocklist/refresh.zig").Policy;
 pub const Definitions = definitions_module.Definitions;
 pub const Document = document_module.Document;
 
@@ -47,6 +48,7 @@ pub const Config = struct {
     log_level: std.log.Level,
     allocator: std.mem.Allocator,
     definitions: Definitions,
+    blocklist_refresh: RefreshPolicy = .{},
     records: []const Record,
     base_dir: []const u8,
     api: Api,
@@ -147,6 +149,8 @@ pub fn fromDocument(
         return diagnostic.invalid("schema_version: unsupported version {d}; expected 2", .{document.schema_version});
     if (document.ui.enabled and !document.api.enabled)
         return diagnostic.invalid("ui.enabled: requires api.enabled to be true", .{});
+    document.blocks.refresh.validate() catch |err|
+        return diagnostic.invalid("blocks.refresh: {s}", .{@errorName(err)});
     const listen = document.dns.listen;
     const listen_address = try address(listen.address, listen.port, "dns.listen", diagnostic);
     inline for (@typeInfo(Config.Tcp).@"struct".field_names) |field| {
@@ -221,6 +225,7 @@ pub fn fromDocument(
         .log_level = document.logging.level,
         .allocator = allocator,
         .definitions = definitions,
+        .blocklist_refresh = document.blocks.refresh,
         .records = records,
         .base_dir = owned_base_dir,
         .api = api,
@@ -268,6 +273,7 @@ pub fn toDocument(allocator: std.mem.Allocator, self: *const Config) !Document {
         .file_root = try documentPath(allocator, self.base_dir, api.file_root),
         .allow_private_sources = api.allow_private_sources,
     };
+    result.blocks.refresh = self.blocklist_refresh;
     result.blocks.domains = try copyStrings(allocator, self.definitions.blocks.items);
     result.allows.domains = try copyStrings(allocator, self.definitions.allows.items);
     const Source = @import("../blocklist/source.zig").Source;
@@ -418,6 +424,7 @@ test "minimal configuration applies every optional default" {
     try std.testing.expectEqual(@as(usize, 4096), config.cache_capacity);
     try std.testing.expectEqual(std.log.Level.info, config.log_level);
     try std.testing.expectEqual(@as(usize, 0), config.records.len);
+    try std.testing.expectEqualDeep(RefreshPolicy{}, config.blocklist_refresh);
 }
 
 test "explicit configuration owns addresses and preserves upstream order" {
@@ -676,13 +683,18 @@ test "allocation failures release partial filtering definitions and base directo
 
 test "prepared runtime state outlives its configuration definitions" {
     var diagnostic: Diagnostic = .{};
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "missing", .data = "0.0.0.0 disabled.test\n" });
+    const base_dir = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(base_dir);
     var state = blk: {
         var config = try parse(std.testing.allocator,
             \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
             \\"blocks":{"domains":["Blocked.Example."],"lists":[
             \\{"id":"off","name":"Disabled","enabled":false,"source":{"kind":"file","value":"missing"},"format":"hosts"}]},
             \\"allows":{"domains":["Allowed.Example"]}}
-        , ".", &diagnostic);
+        , base_dir, &diagnostic);
         defer config.deinit();
         break :blk try config.prepareState(std.testing.io, null, &diagnostic);
     };
@@ -693,6 +705,7 @@ test "prepared runtime state outlives its configuration definitions" {
     try std.testing.expectEqualStrings("Disabled", source.name.?);
     try std.testing.expectEqualStrings("missing", source.source.value);
     try std.testing.expect(!source.enabled);
+    try std.testing.expect(!state.lists.contains("disabled.test"));
 }
 
 test "all filtering structure and disabled definition validation occurs during parsing" {
@@ -1100,5 +1113,90 @@ test "TCP limits reject zero and coercions and retain positive boundaries throug
         try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
         try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), "dns.tcp." ++ field) != null);
         @field(document.dns.tcp, field) = saved;
+    }
+}
+
+test "global refresh policies reject malformed JSON fields" {
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"blocks\":{";
+    inline for (.{ "interval_seconds", "retry_initial_seconds", "retry_max_seconds" }) |field| {
+        inline for (.{ "-1", "4294967296", "\"1\"", "1.0", "1e1", "null", "true", "[]", "{}" }) |value| {
+            try expectInvalid(prefix ++ "\"refresh\":{\"" ++ field ++ "\":" ++ value ++ "}}}");
+        }
+    }
+    inline for (.{ "\"10\"", "-1", "101", "256", "1.0", "1e1", "null", "false" }) |value| {
+        try expectInvalid(prefix ++ "\"refresh\":{\"jitter_percent\":" ++ value ++ "}}}");
+    }
+    inline for (.{ "0", "\"true\"", "null", "[]", "{}" }) |value| {
+        try expectInvalid(prefix ++ "\"refresh\":{\"enabled\":" ++ value ++ "}}}");
+    }
+    inline for (.{ "null", "[]", "false", "{\"unknown\":1}" }) |value| {
+        try expectInvalid(prefix ++ "\"refresh\":" ++ value ++ "}}");
+    }
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.InvalidJson, parse(std.testing.allocator, prefix ++ "\"refresh\":{\"enabled\":true,\"enabled\":false}}}", ".", &diagnostic));
+}
+
+test "constructed global refresh policies reject invalid values even when scheduling is disabled" {
+    var document: Document = .{
+        .schema_version = 2,
+        .api = .{ .enabled = false },
+        .ui = .{ .enabled = false },
+        .upstream = .{ .servers = &.{.{ .address = "1.1.1.1" }} },
+    };
+    var diagnostic: Diagnostic = .{};
+    inline for (.{ "interval_seconds", "retry_initial_seconds", "retry_max_seconds" }) |field| {
+        document.blocks.refresh = .{};
+        @field(document.blocks.refresh, field) = 0;
+        try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.text(), "blocks.refresh") != null);
+    }
+    document.blocks.refresh = .{ .enabled = false, .retry_initial_seconds = 301, .retry_max_seconds = 300 };
+    try std.testing.expectError(error.InvalidConfig, fromDocument(std.testing.allocator, &document, ".", &diagnostic));
+    document.blocks.refresh = .{ .enabled = false, .interval_seconds = 120, .jitter_percent = 0, .retry_initial_seconds = 5, .retry_max_seconds = 20 };
+    document.blocks.lists = &.{.{
+        .id = "off",
+        .enabled = false,
+        .source = .{ .kind = .file, .value = "missing" },
+        .format = .domains,
+    }};
+    var valid = try fromDocument(std.testing.allocator, &document, ".", &diagnostic);
+    defer valid.deinit();
+    try std.testing.expectEqualDeep(document.blocks.refresh, valid.blocklist_refresh);
+}
+
+test "canonical refresh round trip preserves the single global policy" {
+    const allocator = std.testing.allocator;
+    var diagnostic: Diagnostic = .{};
+    var original = try parse(allocator,
+        \\{"schema_version":2,"api":{"enabled":false},"ui":{"enabled":false},"upstream":{"servers":[{"address":"1.1.1.1"}]},
+        \\"blocks":{"refresh":{"enabled":false,"interval_seconds":4294967295,"jitter_percent":100,"retry_initial_seconds":1200,"retry_max_seconds":60000},"lists":[
+        \\{"id":"off","enabled":false,"source":{"kind":"file","value":"missing"},"format":"domains"},
+        \\{"id":"on","source":{"kind":"file","value":"also-missing"},"format":"domains"}]}}
+    , ".", &diagnostic);
+    defer original.deinit();
+    try std.testing.expectEqualDeep(RefreshPolicy{
+        .enabled = false,
+        .interval_seconds = 4294967295,
+        .jitter_percent = 100,
+        .retry_initial_seconds = 1200,
+        .retry_max_seconds = 60000,
+    }, original.blocklist_refresh);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const canonical = try toDocument(arena.allocator(), &original);
+    try std.testing.expectEqualDeep(original.blocklist_refresh, canonical.blocks.refresh);
+    const json = try std.json.Stringify.valueAlloc(arena.allocator(), canonical, .{ .emit_null_optional_fields = false });
+    var restored = try parse(allocator, json, ".", &diagnostic);
+    defer restored.deinit();
+    try std.testing.expectEqualDeep(original.blocklist_refresh, restored.blocklist_refresh);
+    try std.testing.expectEqual(@as(usize, 2), restored.definitions.sources.items.len);
+    try std.testing.expect(!restored.definitions.sources.items[0].enabled);
+    try std.testing.expect(restored.definitions.sources.items[1].enabled);
+}
+
+test "per-source refresh configuration is rejected rather than ignored" {
+    const prefix = "{\"schema_version\":2,\"api\":{\"enabled\":false},\"ui\":{\"enabled\":false},\"upstream\":{\"servers\":[{\"address\":\"1.1.1.1\"}]},\"blocks\":{\"lists\":[{\"id\":\"list\",\"source\":{\"kind\":\"file\",\"value\":\"list.txt\"},\"format\":\"domains\",\"refresh\":";
+    inline for (.{ "{}", "{\"enabled\":false}", "{\"interval_seconds\":60}", "null" }) |value| {
+        try expectInvalid(prefix ++ value ++ "}]}}");
     }
 }

@@ -32,7 +32,7 @@ def run():
         dns_port, api_port = free_port(), free_port()
         document = {
             "schema_version": 2,
-            "api": {"listen": {"address": "127.0.0.1", "port": api_port}, "key_file": str(key)},
+            "api": {"listen": {"address": "127.0.0.1", "port": api_port}, "key_file": str(key), "file_root": str(base)},
             "ui": {},
             "dns": {"listen": {"address": "127.0.0.1", "port": dns_port}},
             "upstream": {"servers": [{"address": "127.0.0.1", "port": free_port()}], "timeout_ms": 50},
@@ -124,6 +124,15 @@ def run():
             start()
             assert source("first")["status"]["state"] == "active"
             assert source("missing")["status"]["state"] == "unavailable"
+            # Refresh configuration exists only at blocks.refresh, never on a source.
+            assert "refresh" not in source("first")
+            _, headers, _ = api("/status")
+            etag = next(v for k, v in headers.items() if k.lower() == "etag")
+            granular = {"id": "granular", "enabled": False, "source": {"kind": "file", "value": "first.txt"}, "format": "domains", "refresh": {"interval_seconds": 60}}
+            assert api("/blocklists", "POST", granular, etag)[0] == 400
+            invalid_document = json.loads(json.dumps(document))
+            invalid_document["blocks"]["lists"][0]["refresh"] = {}
+            assert api("/config/validate", "POST", invalid_document)[0] == 400
             assert blocked("first.test") and blocked("common.test")
             assert json.loads(config.read_text())["blocks"]["lists"][2].get("enabled", True)
             assert api("/blocklists/first/domains", authenticated=False)[0] == 401
@@ -204,10 +213,10 @@ def run():
             del document["allows"]
             config.write_text(json.dumps(document))
             mutate("/config/reload")
-            document["blocks"]["lists"].append({"id": "matches", "enabled": False, "source": {"kind": "url", "value": "https://example.test/domains.txt"}, "format": "domains"})
+            document["blocks"]["lists"].append({"id": "matches", "enabled": False, "source": {"kind": "file", "value": "missing.txt"}, "format": "domains"})
             config.write_text(json.dumps(document))
             mutate("/config/reload")
-            assert source("matches")["status"]["state"] == "disabled"
+            assert source("matches")["status"]["state"] == "unavailable"
             assert api("/blocklists/matches", "PUT", {})[0] == 428
             mutate("/blocklists/matches", "DELETE")
             assert matches("common.test")["matches"][0]["source_ids"] == ["first", "second"]
@@ -262,6 +271,63 @@ def run():
             with sqlite3.connect(lists) as db:
                 assert db.execute("SELECT count(*) FROM lists WHERE id='second'").fetchone()[0] == 0
             assert lists.stat().st_mode & 0o077 == 0
+            # Exercise real timer admission, disabled snapshots, backoff and recovery.
+            first.write_text("scheduled-old.test\n")
+            saved["blocks"] = {
+                "refresh": {"interval_seconds": 2, "jitter_percent": 0, "retry_initial_seconds": 2, "retry_max_seconds": 8},
+                "lists": [{"id": "first", "enabled": False, "source": {"kind": "file", "value": "first.txt"}, "format": "domains"}],
+            }
+            config.write_text(json.dumps(saved))
+            start()
+
+            def await_source(predicate):
+                deadline = time.monotonic() + 12
+                while time.monotonic() < deadline:
+                    current = source("first")["status"]
+                    if predicate(current):
+                        return current
+                    time.sleep(0.05)
+                raise AssertionError(("scheduled refresh timeout", current))
+
+            initial = source("first")["status"]
+            assert initial["snapshot_domain_count"] == 1 and initial["active_domain_count"] == 0
+            assert initial["next_refresh_at_ms"] and initial["last_attempt_at_ms"]
+            first.write_text("scheduled-new.test\nshared.test\n")
+            updated = await_source(lambda s: s["snapshot_domain_count"] == 2)
+            assert updated["last_success_at_ms"] > initial["last_success_at_ms"]
+            assert not imported("scheduled-new.test")
+            assert browse()["items"] == ["scheduled-new.test", "shared.test"]
+            assert matches("scheduled-new.test")["sources"] == []
+            first.write_text("||invalid.test^\n")
+            failed = await_source(lambda s: s["consecutive_failures"] >= 1)
+            assert failed["state"] == "degraded" and failed["last_success_at_ms"] == updated["last_success_at_ms"]
+            assert failed["next_refresh_at_ms"] > failed["last_completed_at_ms"]
+            assert browse()["items"] == ["scheduled-new.test", "shared.test"]
+            first.write_text("recovered.test\n")
+            recovered = await_source(lambda s: s["consecutive_failures"] == 0 and s["last_success_at_ms"] > updated["last_success_at_ms"])
+            assert recovered["snapshot_domain_count"] == 1 and not imported("recovered.test")
+            # Manual-only stops timer refreshes without disabling manual refresh.
+            saved["blocks"]["refresh"]["enabled"] = False
+            config.write_text(json.dumps(saved))
+            mutate("/config/reload")
+            assert source("first")["status"]["next_refresh_at_ms"] is None
+            first.write_text("manual-only.test\n")
+            time.sleep(3)
+            assert browse()["items"] == ["recovered.test"]
+            mutate("/blocklists/first/refresh")
+            assert browse()["items"] == ["manual-only.test"] and not imported("manual-only.test")
+            # Re-enable policy participation; publication exposes the complete set.
+            saved["blocks"]["lists"][0]["enabled"] = True
+            config.write_text(json.dumps(saved))
+            mutate("/config/reload")
+            assert blocked("manual-only.test")
+            saved["blocks"]["refresh"]["enabled"] = True
+            config.write_text(json.dumps(saved))
+            mutate("/config/reload")
+            first.write_text("enabled-timer.test\n")
+            await_source(lambda s: s["active_domain_count"] == 1 and s["last_success_at_ms"] > recovered["last_success_at_ms"] and imported("enabled-timer.test"))
+            assert blocked("enabled-timer.test") and not imported("manual-only.test")
+            stop()
             print("List integration passed: persistence, restart fallback, health, overlap, empty replacement, deletion, definition isolation, and private database.")
         finally:
             if proc and proc.poll() is None:

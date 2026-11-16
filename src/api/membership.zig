@@ -100,8 +100,8 @@ fn read(state: *State, io: std.Io, a: std.mem.Allocator, request: bridge.Request
         kind = requested orelse if (entry.source.enabled) Kind.active else Kind.saved;
         if (kind == .active) {
             version = entry.version orelse return error.SnapshotUnavailable;
-            if (!contributes(entry.health)) return error.SnapshotUnavailable;
-            success = entry.health.last_success_at_ms;
+            if (!entry.source.enabled or !contributes(entry.health)) return error.SnapshotUnavailable;
+            success = entry.active_last_success_at_ms;
             count = entry.snapshot.len;
             const lower = if (last.len != 0) last else exact orelse prefix orelse "";
             var position = Index.lowerBound(entry.snapshot, lower);
@@ -132,7 +132,7 @@ fn read(state: *State, io: std.Io, a: std.mem.Allocator, request: bridge.Request
         defer state.mutex.unlock(io);
         if (state.lists.sources.get(id)) |current| {
             if (current.version) |used| {
-                if (current.fingerprint) |current_key| active = contributes(current.health) and std.mem.eql(u8, &used, &version) and std.mem.eql(u8, &key, &current_key);
+                if (current.fingerprint) |current_key| active = current.source.enabled and contributes(current.health) and std.mem.eql(u8, &used, &version) and std.mem.eql(u8, &key, &current_key);
             }
         }
     }
@@ -159,7 +159,7 @@ pub fn collect(state: *State, io: std.Io, a: std.mem.Allocator, names: []const [
         generation = state.lists.generation;
         var entries = state.lists.sources.valueIterator();
         while (entries.next()) |entry| {
-            if (!contributes(entry.health)) continue;
+            if (!entry.source.enabled or !contributes(entry.health)) continue;
             var copied: ?Source = null;
             for (names, ids) |name, *list| {
                 if (!Index.snapshotContains(entry.snapshot, name)) continue;

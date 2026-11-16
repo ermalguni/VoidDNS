@@ -445,7 +445,7 @@ Enter one command per line:
 | --- | --- |
 | `reload` | Validate the configured file and atomically apply its semantic differences |
 | `refresh <source-id>` | Reload the contents of one currently active source definition |
-| `refresh-all` | Reload all enabled source contents in one transaction |
+| `refresh-all` | Reload all source contents, including disabled sources, in one transaction |
 | `save <candidate-file>` | Parse and validate a typed document, serialize and atomically save it to the configured path, then request reload |
 | `quit` | Cooperatively stop and join the DNS worker, then exit |
 
@@ -468,10 +468,10 @@ Every completed management operation advances its revision.
 | --- | --- |
 | Record added, removed, addresses/TTL changed | Publish the new record collection, retaining unchanged name/address allocations |
 | Explicit allow/block changed | Add/remove only affected normalized names |
-| Enabled source added or enabled | Load only that source and add its memberships |
+| Source added or URL/path/format changed | Import that source, including disabled sources; publish memberships only when enabled |
 | Source removed or disabled | Release its RAM memberships; disabling retains its durable snapshot, deleting removes its stored memberships |
-| Enabled source URL/path/format changed | Prepare and replace only that source's snapshot |
-| Source display name changed | Update metadata without source I/O |
+| Source enabled | Publish compatible retained memberships without source I/O |
+| Source display name or global refresh policy changed | Update metadata or scheduling without source I/O |
 | Log level changed | Update the atomic threshold |
 | Upstream timeout changed | Update the pool timeout at a query boundary, retaining cache and rotation |
 | Upstream servers changed | Replace the pool and clear the upstream response cache |
@@ -482,12 +482,12 @@ Every completed management operation advances its revision.
 **Reload is not refresh.** An unchanged file path or URL retains its last imported
 snapshot even if its contents changed or the source is now unavailable. Use
 `refresh <source-id>` or `refresh-all` to import new contents. These commands use
-the active definitions, not unapplied edits in the configuration file. Refreshing
-a disabled source is a no-op; an unknown source ID is rejected. Refresh-all
-fetches every enabled source and publishes prepared memberships and health
-together. Each failed fetch uses a compatible saved snapshot, or leaves that
-source unavailable when none exists. Restart also fetches every enabled source
-before considering a saved fallback.
+the active definitions, not unapplied edits in the configuration file. Disabled
+sources can be refreshed even when global scheduling is off; unknown source IDs are rejected.
+Refresh-all fetches every source and publishes prepared snapshots and health
+together. Each failed fetch retains compatible last-known-good data, or leaves
+that source unavailable when none exists. Restart attempts every source,
+including disabled sources, even when global scheduling is off, before considering saved fallback.
 
 Fetching, parsing, and staging happen while DNS continues serving. Every
 fallible reservation completes before publication; invalid configuration,
@@ -622,16 +622,13 @@ Each source is limited to 32 MiB after decompression. PRO and TIF measured about
 may exceed the limit. Download sizes do not describe RAM consumption or peak
 refresh usage; measure those separately for the target machine.
 
-The example downloads its enabled URL sources at startup. Disabled sources are
-not downloaded. Additional feeds can overlap with HaGeZi and each other,
-increasing download time and RAM usage. Failed imports are logged and use a
-compatible saved snapshot, if available. Without one, the source stays enabled
-but unavailable, providing no imported blocking protection until a successful
-refresh or restart. Disable unwanted sources rather than assuming all Pi-hole
-lists are compatible. Matching remains exact for these feeds.
-Use an explicit refresh to update imported contents; an ordinary reload preserves
-snapshots whose source definitions have not changed. No automatic refresh scheduler
-is implemented.
+The example attempts every URL source at startup, including disabled sources.
+Additional feeds can overlap with HaGeZi and each other, increasing download
+time, disk space, and import memory usage. Disable a source to stop its DNS
+contribution. Global `blocks.refresh.enabled: false` stops scheduled imports for all lists.
+Failed imports retain compatible saved data indefinitely. Without a snapshot,
+the source is unavailable until a successful import. Matching remains exact.
+Ordinary reload preserves snapshots whose source definitions have not changed.
 
 The file is authoritative, not a seed merged with another store. Apply changes
 through the explicit reload channel above or restart. Omit `blocks` and `allows`
@@ -730,8 +727,8 @@ the policy checks.
 
 ### Ownership, updates, and limits
 
-Before binding the listener, startup attempts every enabled list. Restart and
-explicit refresh are **fetch-first**: even when a saved snapshot exists, VoidDNS
+Before binding the listener, startup attempts every list, including disabled
+lists, even when global scheduling is off. Startup and explicit refresh are **fetch-first**: VoidDNS
 tries the configured URL or file before falling back. Missing files, failed
 downloads, and malformed content are logged with source ID/name and a safe error
 name, without exposing source locations. With the snapshot store configured,
@@ -763,28 +760,60 @@ A saved snapshot is eligible only when its source fingerprint matches the active
 definition and import semantic version. The fingerprint covers source kind,
 location and format, API-managed provenance, private-source access policy,
 configured file root, and the resolved configuration base directory. Display
-name and enabled-state changes do not change source identity. Changing a
+name, enabled-state, and global refresh-policy changes do not change source identity. Changing a
 location, parser semantics, or access policy cannot resurrect an unrelated or
 no-longer-compatible snapshot. Failed fetches with
-a compatible snapshot serve it as **degraded**. With no compatible snapshot,
-the enabled source is **unavailable**. A successful fetch is **active**, and its
-complete result replaces the previous saved and RAM memberships, including a
-successful empty import. **Disabled** sources do not contribute RAM memberships
-but retain their saved snapshot; re-enabling still fetches first. Deleting a
+a compatible snapshot are **degraded**. With no compatible snapshot, the source
+is **unavailable**. A successful fetch is **active**, independent of enabled state,
+and its complete result replaces previous saved data, including an empty import.
+Disabled sources still fetch, parse, and persist snapshots but contribute no DNS
+memberships. Re-enabling uses compatible retained data without fetching. Deleting a
 source removes its stored memberships. Names supplied by another source remain
 blocked, and explicit blocks stay independent of imported names.
 
-The API and blocklist UI expose response-only `status`: `state`, safe
-`last_error`, nullable `last_success_at_ms` (Unix epoch milliseconds), and
-`domain_count`. These runtime fields are not accepted in source write bodies
-and never persist in configuration JSON. A successful management operation can
-publish degraded or unavailable source health; inspect it rather than assuming
-every enabled source is serving fresh data.
+The API and UI expose response-only import `status`, independent of `enabled`:
+`state`, safe `last_error`, nullable `last_success_at_ms`, `last_attempt_at_ms`,
+`last_completed_at_ms`, `next_refresh_at_ms` (Unix epoch milliseconds),
+`consecutive_failures`, and `refreshing`. `snapshot_domain_count` counts retained
+names; `active_domain_count` counts DNS contributions and is zero when disabled.
+`domain_count` remains an alias for the active count. These fields never persist
+in configuration and are rejected in source write bodies.
 
-Reload retains unchanged snapshots, so unrelated record edits work even when an
-existing source is unavailable. No automatic refresh scheduler, file watcher,
-or peer synchronization is implemented. The in-process service supports add,
-replace, refresh, and remove. Mutation commits require the publication mutex.
+### Scheduled blocklist refresh
+
+The single global `blocks.refresh` policy applies to **all blocklists**, including
+disabled lists. It defaults to:
+`{"enabled":true,"interval_seconds":86400,"jitter_percent":10,"retry_initial_seconds":300,"retry_max_seconds":21600}`.
+Missing global fields use defaults. Objects and fields must not be null. Seconds
+are positive integers up to 4294967295, jitter is an integer from 0 to 100, and
+the maximum retry must be at least the initial retry.
+Use **Blocklists → Global refresh settings** to edit all five fields, or edit
+`blocks.refresh` in **Configuration**. The Blocklists editor saves through the
+complete configuration's revision precondition, preserving unrelated settings
+and collections. Conflicts preserve the draft and require explicit review of
+current state before another save.
+`blocks.refresh.enabled: false` disables scheduling globally, independently of
+each source's DNS `enabled` flag. Startup imports and the one-source and
+all-source manual refresh actions remain available. Disabled sources continue
+updating saved snapshots without contributing RAM memberships.
+
+Successful attempts schedule the normal interval with uniform plus/minus
+`jitter_percent` variation. Failures, including saved-snapshot fallback, increment
+the failure count and retry with exponential backoff from `retry_initial_seconds`,
+capped at `min(interval_seconds, retry_max_seconds)`; retry jitter stays within
+that cap. Success resets failures. Compatible last-known-good data never expires.
+Startup imports count as attempts and establish the first deadlines. Reload
+preserves unchanged data; metadata and schedule edits do not access sources.
+Schedule edits recompute deadlines. Deadlines use monotonic time in RAM only,
+are not persisted, and restart establishes a new schedule. Shutdown cancels
+in-flight work and joins management before releasing owned runtime state.
+
+Only one scheduled source runs globally at a time through the serialized
+management job. Each scheduled source publishes atomically; manual refresh-all
+publishes participating sources together. Completed refresh publications advance
+the global revision, including health-only failures, so open editor preconditions
+can become stale. Deadline bookkeeping alone does not advance the revision.
+There is no file watcher or peer synchronization. Mutation commits require the publication mutex.
 Main is the sole writer and prepares source contents outside that mutex; it
 never changes live memberships until all participating plans have reserved
 capacity successfully. Queries cannot borrow managed strings or records beyond
@@ -1014,7 +1043,7 @@ embedded [OpenAPI 3.1 contract](src/api/openapi.json) at `/openapi.json`.
 | `GET /blocklists/{id}/domains` | Read-only alphabetical browsing of an active or saved imported snapshot |
 | `POST /blocklists/matches` | Read-only batch of current active memberships for up to 100 domain names; no `If-Match` |
 | `POST /blocklists/{id}/refresh` | Refresh one source from its active definition |
-| `POST /blocklists/refresh` | Atomically refresh all enabled sources |
+| `POST /blocklists/refresh` | Atomically refresh all sources, including disabled sources, even when global scheduling is off |
 | `GET /operations/{id}` | Poll a running or recently completed operation |
 | `GET /policy/check?name=example.test&type=A` | Explain exact-name policy; never query upstream |
 | `GET /cache` | Cache capacity and occupied slots, including entries not yet reclaimed after expiry |

@@ -173,6 +173,11 @@ pub fn main(init: std.process.Init) !void {
         .next_generation = &next_generation,
         .telemetry = telemetry,
     };
+    active.state.mutex.lockUncancelable(io);
+    active.state.lists.initializeSchedules(io, active.settings.blocklist_refresh);
+    active.state.mutex.unlock(io);
+    var refresh_timer = try io.concurrent(control.Mailbox.refreshTicks, .{ &mailbox, io });
+    defer refresh_timer.cancel(io) catch {};
     var bridge = management.asBridge();
     var api: ?ApiServer = null;
     defer {
@@ -201,6 +206,9 @@ pub fn main(init: std.process.Init) !void {
             .operation_ready => {
                 management.complete();
                 if (management.quit_requested and management.job == null) return;
+            },
+            .refresh_tick => management.scheduledRefresh() catch |err| {
+                std.log.err("scheduled refresh admission failed: {s}", .{@errorName(err)});
             },
             .worker_failed => |failure| {
                 // A joined worker may have reported just before cancellation.

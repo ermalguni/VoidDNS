@@ -23,6 +23,7 @@ pub const Definitions = struct {
 /// Validate and independently own filtering definitions, including disabled
 /// sources. Domain spelling is normalized only in the runtime snapshot.
 pub fn fromDocument(allocator: std.mem.Allocator, document: *const Document) !Definitions {
+    try document.blocks.refresh.validate();
     var definitions: Definitions = .{};
     errdefer definitions.deinit(allocator);
     try copyDomains(allocator, document.blocks.domains, &definitions.blocks);

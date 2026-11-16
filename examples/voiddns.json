@@ -53,6 +53,13 @@
     }
   ],
   "blocks": {
+    "refresh": {
+      "enabled": true,
+      "interval_seconds": 86400,
+      "jitter_percent": 10,
+      "retry_initial_seconds": 300,
+      "retry_max_seconds": 21600
+    },
     "lists": [
       {
         "id": "example-domains",

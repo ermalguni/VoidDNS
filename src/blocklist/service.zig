@@ -4,6 +4,7 @@ const fetch = @import("fetch.zig");
 const parse = @import("parse.zig");
 const Index = @import("index.zig").Index;
 const Store = @import("../lists/store.zig").Store;
+const Policy = @import("refresh.zig").Policy;
 const log = std.log.scoped(.blocklist);
 var volatile_version = std.atomic.Value(u32).init(1);
 
@@ -16,13 +17,24 @@ pub const Service = struct {
         health: Health,
         fingerprint: ?[64]u8 = null,
         version: ?[32]u8 = null,
+        active_last_success_at_ms: ?i64 = null,
+        schedule_policy: ?Policy = null,
+        next_due_ms: ?i64 = null,
     };
 
     pub const Health = struct {
-        state: enum { disabled, active, degraded, unavailable },
+        state: enum { active, degraded, unavailable },
         last_error: ?[]const u8 = null,
         last_success_at_ms: ?i64 = null,
+        /// Compatibility: domains currently contributing DNS memberships.
         domain_count: usize = 0,
+        snapshot_domain_count: usize = 0,
+        active_domain_count: usize = 0,
+        last_attempt_at_ms: ?i64 = null,
+        last_completed_at_ms: ?i64 = null,
+        consecutive_failures: u32 = 0,
+        next_refresh_at_ms: ?i64 = null,
+        refreshing: bool = false,
     };
 
     pub const Refresh = union(enum) {
@@ -98,9 +110,15 @@ pub const Service = struct {
                     entry.* = .{
                         .source = change.source,
                         .snapshot = change.snapshot orelse old.snapshot,
-                        .health = change.health orelse old.health,
+                        .health = if (change.health) |status| importHealth(status, old.health) else old.health,
                         .fingerprint = change.fingerprint,
                         .version = if (change.snapshot != null) change.version else old.version,
+                        .active_last_success_at_ms = if (change.snapshot != null)
+                            (if (change.source.enabled) change.health.?.last_success_at_ms else null)
+                        else
+                            old.active_last_success_at_ms,
+                        .schedule_policy = if (change.health != null and !old.health.refreshing) null else old.schedule_policy,
+                        .next_due_ms = if (change.health != null and !old.health.refreshing) null else old.next_due_ms,
                     };
                     if (change.snapshot != null) service.index.release(old.snapshot);
                     if (old.source.name) |name| self.allocator.free(name);
@@ -113,6 +131,7 @@ pub const Service = struct {
                         .health = change.health.?,
                         .fingerprint = change.fingerprint,
                         .version = change.version,
+                        .active_last_success_at_ms = if (change.source.enabled) change.health.?.last_success_at_ms else null,
                     });
                 }
             }
@@ -157,6 +176,134 @@ pub const Service = struct {
         return if (self.sources.get(id)) |entry| entry.health else null;
     }
 
+    /// Called under the publication guard after startup or configuration changes.
+    /// The DNS enabled flag does not control background snapshot maintenance.
+    pub fn initializeSchedules(self: *Service, io: std.Io, policy: Policy) void {
+        var entries = self.sources.valueIterator();
+        while (entries.next()) |entry| {
+            if (entry.schedule_policy) |previous| {
+                if (std.meta.eql(previous, policy)) continue;
+            }
+            entry.schedule_policy = policy;
+            schedule(entry, io, policy);
+        }
+    }
+
+    /// Returns a borrowed ID only when its earliest monotonic deadline is due.
+    pub fn nextDue(self: *const Service, io: std.Io) ?[]const u8 {
+        const now = std.Io.Clock.awake.now(io).toMilliseconds();
+        var earliest: ?i64 = null;
+        var id: ?[]const u8 = null;
+        var entries = self.sources.valueIterator();
+        while (entries.next()) |entry| {
+            if (entry.health.refreshing) continue;
+            const due = entry.next_due_ms orelse continue;
+            if (due > now) continue;
+            if (earliest == null or due < earliest.? or
+                (due == earliest.? and std.mem.lessThan(u8, entry.source.id, id.?)))
+            {
+                earliest = due;
+                id = entry.source.id;
+            }
+        }
+        return id;
+    }
+
+    pub fn beginRefresh(self: *Service, io: std.Io, selection: Refresh) void {
+        const now = std.Io.Clock.real.now(io).toMilliseconds();
+        var entries = self.sources.valueIterator();
+        while (entries.next()) |entry| {
+            if (!selected(selection, entry.source.id)) continue;
+            entry.health.refreshing = true;
+            entry.health.last_attempt_at_ms = now;
+            entry.health.next_refresh_at_ms = null;
+            entry.next_due_ms = null;
+        }
+    }
+
+    /// Publish completion under the guard, including preparation/storage errors.
+    /// A durable fallback is useful data, but still a failed refresh attempt.
+    pub fn finishRefresh(self: *Service, io: std.Io, selection: Refresh, failure: ?anyerror, policy: Policy) void {
+        const now = std.Io.Clock.real.now(io).toMilliseconds();
+        var entries = self.sources.valueIterator();
+        while (entries.next()) |entry| {
+            if (!selected(selection, entry.source.id)) continue;
+            if (failure) |err| {
+                entry.health.last_error = @errorName(err);
+                entry.health.state = if (entry.health.last_success_at_ms != null) .degraded else .unavailable;
+            }
+            entry.health.last_completed_at_ms = now;
+            entry.health.refreshing = false;
+            if (failure != null or entry.health.state != .active) {
+                entry.health.consecutive_failures +|= 1;
+            } else {
+                entry.health.consecutive_failures = 0;
+            }
+            entry.schedule_policy = policy;
+            schedule(entry, io, policy);
+        }
+    }
+
+    fn selected(selection: Refresh, id: []const u8) bool {
+        return switch (selection) {
+            .none => false,
+            .all => true,
+            .one => |wanted| std.mem.eql(u8, wanted, id),
+        };
+    }
+
+    fn schedule(entry: *Entry, io: std.Io, policy: Policy) void {
+        entry.next_due_ms = null;
+        entry.health.next_refresh_at_ms = null;
+        if (!policy.enabled or entry.health.refreshing) return;
+        const entropy_value = if (policy.jitter_percent != 0) blk: {
+            var entropy: [8]u8 = undefined;
+            io.random(&entropy);
+            break :blk std.mem.readInt(u64, &entropy, .little);
+        } else @as(u64, 0);
+        const delay_ms: i64 = @intCast(@import("refresh.zig").delaySeconds(
+            policy,
+            entry.health.consecutive_failures,
+            entropy_value,
+        ) * std.time.ms_per_s);
+        const real_now = std.Io.Clock.real.now(io).toMilliseconds();
+        // Import completion can precede schedule initialization at startup.
+        const elapsed = if (entry.health.last_completed_at_ms) |completed|
+            @max(0, real_now -| completed)
+        else
+            0;
+        const remaining = @max(0, delay_ms -| elapsed);
+        entry.next_due_ms = std.Io.Clock.awake.now(io).toMilliseconds() +| remaining;
+        entry.health.next_refresh_at_ms = real_now +| remaining;
+    }
+
+    fn retainRuntime(status: Health, previous: Health) Health {
+        var result = status;
+        result.last_attempt_at_ms = previous.last_attempt_at_ms;
+        result.last_completed_at_ms = previous.last_completed_at_ms;
+        result.consecutive_failures = previous.consecutive_failures;
+        result.next_refresh_at_ms = previous.next_refresh_at_ms;
+        result.refreshing = previous.refreshing;
+        return result;
+    }
+
+    fn importHealth(status: Health, previous: Health) Health {
+        if (previous.refreshing) return retainRuntime(status, previous);
+        var result = status;
+        result.consecutive_failures = if (status.state == .active) 0 else previous.consecutive_failures +| 1;
+        return result;
+    }
+
+    fn retainContent(status: Health, previous: Health, active_count: usize) Health {
+        var result = status;
+        result.last_success_at_ms = status.last_success_at_ms orelse previous.last_success_at_ms;
+        result.state = if (result.last_success_at_ms != null) .degraded else .unavailable;
+        if (status.last_success_at_ms == null) result.snapshot_domain_count = previous.snapshot_domain_count;
+        result.active_domain_count = active_count;
+        result.domain_count = active_count;
+        return result;
+    }
+
     /// Compare definitions by ID, independent of order. Only additions,
     /// newly-enabled sources, changed locations/formats, or explicit refreshes
     /// perform I/O. Never reads the live domain index during preparation.
@@ -188,7 +335,7 @@ pub const Service = struct {
         for (definitions) |source| {
             const fingerprint_value = if (resolved_base) |path| fingerprint(source, path) else null;
             const old = self.sources.get(source.id);
-            const explicit_refresh = source.enabled and switch (requested) {
+            const explicit_refresh = switch (requested) {
                 .none => false,
                 .all => true,
                 .one => |id| std.mem.eql(u8, source.id, id),
@@ -209,15 +356,27 @@ pub const Service = struct {
             errdefer change.source.deinit(self.allocator);
             errdefer if (change.names) |*names| names.deinit();
             errdefer if (change.snapshot) |snapshot| self.allocator.free(snapshot);
-            if ((source.enabled and (content_changed or explicit_refresh)) or old == null or
-                (old != null and old.?.source.enabled and !source.enabled))
-            {
-                const loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, fingerprint_value);
-                change.names = loaded.names;
+            if (content_changed or explicit_refresh) {
+                var loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, fingerprint_value);
+                // Never publish stale RAM from a different content/security context.
+                if (source.enabled and old != null and old.?.source.enabled and
+                    sameLocation(source, old.?.source) and
+                    sameFingerprint(fingerprint_value, old.?.fingerprint) and
+                    loaded.health.state != .active)
+                {
+                    loaded.names.deinit();
+                    loaded.health = retainContent(loaded.health, old.?.health, old.?.snapshot.len);
+                } else {
+                    if (!source.enabled) {
+                        loaded.names.deinit();
+                        loaded.names = .{ .allocator = self.allocator };
+                    }
+                    change.names = loaded.names;
+                    change.snapshot = try Index.prepareSnapshot(self.allocator, &change.names.?);
+                    plan.incoming_names = std.math.add(u32, plan.incoming_names, change.names.?.entries.count()) catch return error.OutOfMemory;
+                }
                 change.health = loaded.health;
                 change.version = loaded.version;
-                change.snapshot = try Index.prepareSnapshot(self.allocator, &change.names.?);
-                plan.incoming_names = std.math.add(u32, plan.incoming_names, change.names.?.entries.count()) catch return error.OutOfMemory;
             }
             if (old == null) plan.additions = std.math.add(u32, plan.additions, 1) catch return error.OutOfMemory;
             try plan.changes.append(self.allocator, change);
@@ -280,8 +439,15 @@ pub const Service = struct {
         var owned = try source.clone(self.allocator);
         errdefer owned.deinit(self.allocator);
         try self.sources.ensureUnusedCapacity(self.allocator, 1);
-        const loaded = try self.load(io, owned, base_dir);
-        self.sources.putAssumeCapacityNoClobber(owned.id, .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint, .version = loaded.version });
+        const loaded = try self.load(io, owned, base_dir, null);
+        self.sources.putAssumeCapacityNoClobber(owned.id, .{
+            .source = owned,
+            .snapshot = loaded.snapshot,
+            .health = loaded.health,
+            .fingerprint = loaded.fingerprint,
+            .version = loaded.version,
+            .active_last_success_at_ms = if (owned.enabled) loaded.health.last_success_at_ms else null,
+        });
         self.generation +%= 1;
         self.report("added", owned, loaded.snapshot.len);
     }
@@ -293,14 +459,31 @@ pub const Service = struct {
         const entry = self.sources.getPtr(source.id) orelse return error.SourceNotFound;
         var owned = try source.clone(self.allocator);
         errdefer owned.deinit(self.allocator);
-        const loaded = try self.load(io, owned, base_dir);
+        const loaded = self.load(io, owned, base_dir, entry.*) catch |err| {
+            directFailure(entry, io, err);
+            return err;
+        };
         const old = entry.*;
         // Keep the hash table key allocation stable while replacing other fields.
         self.allocator.free(owned.id);
         owned.id = old.source.id;
-        entry.* = .{ .source = owned, .snapshot = loaded.snapshot, .health = loaded.health, .fingerprint = loaded.fingerprint, .version = loaded.version };
+        entry.* = .{
+            .source = owned,
+            .snapshot = loaded.snapshot,
+            .health = importHealth(loaded.health, old.health),
+            .fingerprint = loaded.fingerprint,
+            .version = loaded.version,
+            .active_last_success_at_ms = if (loaded.reused)
+                old.active_last_success_at_ms
+            else if (owned.enabled)
+                loaded.health.last_success_at_ms
+            else
+                null,
+            .schedule_policy = old.schedule_policy,
+        };
+        if (entry.schedule_policy) |policy| schedule(entry, io, policy);
         self.generation +%= 1;
-        self.index.release(old.snapshot);
+        if (!loaded.reused) self.index.release(old.snapshot);
         if (old.source.name) |name| self.allocator.free(name);
         self.allocator.free(old.source.source.value);
         if (old.source.access.file_root) |root| self.allocator.free(root);
@@ -309,15 +492,31 @@ pub const Service = struct {
 
     pub fn refresh(self: *Service, id: []const u8, io: std.Io, base_dir: []const u8) !void {
         const entry = self.sources.getPtr(id) orelse return error.SourceNotFound;
-        const loaded = try self.load(io, entry.source, base_dir);
+        const loaded = self.load(io, entry.source, base_dir, entry.*) catch |err| {
+            directFailure(entry, io, err);
+            return err;
+        };
         const old = entry.snapshot;
         entry.snapshot = loaded.snapshot;
-        entry.health = loaded.health;
+        entry.health = importHealth(loaded.health, entry.health);
         entry.fingerprint = loaded.fingerprint;
         entry.version = loaded.version;
+        if (!loaded.reused) entry.active_last_success_at_ms = if (entry.source.enabled) loaded.health.last_success_at_ms else null;
         self.generation +%= 1;
-        self.index.release(old);
+        if (!loaded.reused) self.index.release(old);
+        if (entry.schedule_policy) |policy| schedule(entry, io, policy);
         self.report("refreshed", entry.source, loaded.snapshot.len);
+    }
+
+    fn directFailure(entry: *Entry, io: std.Io, failure: anyerror) void {
+        const now = std.Io.Clock.real.now(io).toMilliseconds();
+        entry.health.state = if (entry.health.last_success_at_ms != null) .degraded else .unavailable;
+        entry.health.last_error = @errorName(failure);
+        entry.health.last_attempt_at_ms = now;
+        entry.health.last_completed_at_ms = now;
+        entry.health.consecutive_failures +|= 1;
+        entry.health.refreshing = false;
+        if (entry.schedule_policy) |policy| schedule(entry, io, policy);
     }
 
     pub fn remove(self: *Service, id: []const u8) !void {
@@ -336,9 +535,9 @@ pub const Service = struct {
     }
 
     const Loaded = struct { names: parse.Names, health: Health, version: ?[32]u8 = null };
-    const LoadedSnapshot = struct { snapshot: Index.Snapshot, health: Health, fingerprint: ?[64]u8, version: ?[32]u8 };
+    const LoadedSnapshot = struct { snapshot: Index.Snapshot, health: Health, fingerprint: ?[64]u8, version: ?[32]u8, reused: bool = false };
 
-    fn load(self: *Service, io: std.Io, source: Source, base_dir: []const u8) !LoadedSnapshot {
+    fn load(self: *Service, io: std.Io, source: Source, base_dir: []const u8, previous: ?Entry) !LoadedSnapshot {
         var transaction: ?Store.Transaction = if (self.store) |store| try store.begin() else null;
         defer if (transaction) |*tx| tx.deinit();
         const resolved_base = if (self.store != null)
@@ -349,6 +548,25 @@ pub const Service = struct {
         const key = if (resolved_base) |path| fingerprint(source, path) else null;
         var loaded = try self.loadNames(io, source, base_dir, if (transaction) |*tx| tx else null, key);
         defer loaded.names.deinit();
+        if (previous) |old| {
+            if (source.enabled and old.source.enabled and sameLocation(source, old.source) and
+                sameFingerprint(key, old.fingerprint) and loaded.health.state != .active)
+            {
+                if (transaction) |*tx| try tx.commit();
+                return .{
+                    .snapshot = old.snapshot,
+                    .health = retainContent(loaded.health, old.health, old.snapshot.len),
+                    .fingerprint = key,
+                    .version = old.version,
+                    .reused = true,
+                };
+            }
+        }
+        // Disabled sources retain only durable data and health, not DNS names.
+        if (!source.enabled) {
+            loaded.names.deinit();
+            loaded.names = .{ .allocator = self.allocator };
+        }
         const snapshot = try self.index.acquire(&loaded.names);
         errdefer self.index.release(snapshot);
         if (transaction) |*tx| try tx.commit();
@@ -356,7 +574,18 @@ pub const Service = struct {
     }
 
     fn loadNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8, transaction: ?*Store.Transaction, key: ?[64]u8) !Loaded {
-        if (!source.enabled) return .{ .names = .{ .allocator = self.allocator }, .health = .{ .state = .disabled } };
+        const attempted = std.Io.Clock.real.now(io).toMilliseconds();
+        var loaded = try self.importNames(io, source, base_dir, transaction, key);
+        loaded.health.last_attempt_at_ms = attempted;
+        loaded.health.last_completed_at_ms = std.Io.Clock.real.now(io).toMilliseconds();
+        loaded.health.consecutive_failures = if (loaded.health.state == .active) 0 else 1;
+        loaded.health.snapshot_domain_count = loaded.names.entries.count();
+        loaded.health.active_domain_count = if (source.enabled) loaded.names.entries.count() else 0;
+        loaded.health.domain_count = loaded.health.active_domain_count;
+        return loaded;
+    }
+
+    fn importNames(self: *const Service, io: std.Io, source: Source, base_dir: []const u8, transaction: ?*Store.Transaction, key: ?[64]u8) !Loaded {
         const tx = transaction orelse {
             const names = try self.fetchNames(io, source, base_dir);
             const at_ms = std.Io.Clock.real.now(io).toMilliseconds();
@@ -450,16 +679,30 @@ test "service preserves overlapping membership and last known good on failed ref
     try std.testing.expectError(error.SourceNotFound, service.remove("first"));
 }
 
-test "disabled sources are validated and registered without fetching" {
-    var service = Service.init(std.testing.allocator);
+test "disabled sources import health without acquiring DNS memberships" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    try temporary.dir.writeFile(io, .{ .sub_path = "disabled", .data = "0.0.0.0 disabled.test\n" });
+    var service = Service.init(allocator);
     defer service.deinit();
-    const source: Source = .{ .id = "disabled", .enabled = false, .source = .{ .kind = .file, .value = "does-not-exist" }, .format = .hosts };
-    try service.add(std.testing.io, source, ".");
+    const source: Source = .{ .id = "disabled", .enabled = false, .source = .{ .kind = .file, .value = "disabled" }, .format = .hosts };
+    try service.add(io, source, base);
     try std.testing.expectEqual(@as(u32, 1), service.sources.count());
     try std.testing.expectEqual(@as(u32, 0), service.index.entries.count());
+    const status = service.health(source.id).?;
+    try std.testing.expect(status.state == .active);
+    try std.testing.expectEqual(@as(usize, 1), status.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), status.active_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), status.domain_count);
+    try std.testing.expect(status.last_attempt_at_ms != null);
+    try std.testing.expect(status.last_completed_at_ms != null);
     var invalid = source;
     invalid.id = "";
-    try std.testing.expectError(error.InvalidSourceId, service.add(std.testing.io, invalid, "."));
+    try std.testing.expectError(error.InvalidSourceId, service.add(io, invalid, base));
 }
 
 test "plan reuses unavailable unchanged sources and updates metadata without fetching" {
@@ -586,7 +829,7 @@ test "plan enable disable remove and format changes preserve overlapping members
     try std.testing.expectEqual(@as(u32, 0), service.sources.count());
 }
 
-test "explicit one and all refreshes are transactional and skip disabled sources" {
+test "explicit one and all refreshes are transactional and import disabled sources" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
@@ -595,9 +838,10 @@ test "explicit one and all refreshes are transactional and skip disabled sources
     defer allocator.free(base);
     try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "old.test\n" });
     try temporary.dir.writeFile(io, .{ .sub_path = "second", .data = "second.test\n" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "disabled", .data = "disabled.test\n" });
     const first: Source = .{ .id = "first", .source = .{ .kind = .file, .value = "first" }, .format = .domains };
     const second: Source = .{ .id = "second", .source = .{ .kind = .file, .value = "second" }, .format = .domains };
-    const disabled: Source = .{ .id = "disabled", .enabled = false, .source = .{ .kind = .file, .value = "missing" }, .format = .domains };
+    const disabled: Source = .{ .id = "disabled", .enabled = false, .source = .{ .kind = .file, .value = "disabled" }, .format = .domains };
     const definitions = [_]Source{ first, second, disabled };
     var service = Service.init(allocator);
     defer service.deinit();
@@ -617,9 +861,14 @@ test "explicit one and all refreshes are transactional and skip disabled sources
     try std.testing.expect(!service.contains("old.test"));
     try std.testing.expectEqual(second_snapshot.ptr, service.sources.get("second").?.snapshot.ptr);
     try std.testing.expectError(error.SourceNotFound, service.prepare(io, &definitions, base, .{ .one = "unknown" }));
-    var skipped = try service.prepare(io, &definitions, base, .{ .one = "disabled" });
-    defer skipped.deinit();
-    try std.testing.expect(!skipped.changed());
+    try temporary.dir.writeFile(io, .{ .sub_path = "disabled", .data = "disabled-one.test\n" });
+    var disabled_refresh = try service.prepare(io, &definitions, base, .{ .one = "disabled" });
+    defer disabled_refresh.deinit();
+    try std.testing.expect(disabled_refresh.changed());
+    try disabled_refresh.reserve(&service);
+    disabled_refresh.commit(&service);
+    try std.testing.expect(!service.contains("disabled-one.test"));
+    try std.testing.expectEqual(@as(usize, 1), service.health(disabled.id).?.snapshot_domain_count);
     try temporary.dir.writeFile(io, .{ .sub_path = "first", .data = "unpublished.test\n" });
     try std.testing.expectError(error.FileNotFound, service.prepare(io, &definitions, base, .all));
     try std.testing.expect(service.contains("new.test"));
@@ -803,7 +1052,9 @@ test "durable overlap deletion disable retention and successful empty snapshots"
     defer disabled.deinit();
     try disabled.reserve(&service);
     disabled.commit(&service);
-    try std.testing.expect(service.health(first.id).?.state == .disabled);
+    try std.testing.expect(service.health(first.id).?.state == .active);
+    try std.testing.expectEqual(@as(usize, 2), service.health(first.id).?.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), service.health(first.id).?.active_domain_count);
     try std.testing.expect(!service.contains("common.test"));
     try std.testing.expectEqual(@as(i64, 2), (try store.db.one(i64, "SELECT count(*) FROM list_domains", .{}, .{})).?);
     try temporary.dir.deleteFile(io, "first");
@@ -959,4 +1210,252 @@ test "durable refresh-all rolls back DB and preserves unpublished RAM on persist
     try std.testing.expect(service.health(first.id).?.state == .degraded);
     try std.testing.expect(service.contains("old-first.test"));
     try std.testing.expect(service.contains("old-second.test"));
+}
+
+test "disabled durable startup manual and scheduled imports never acquire DNS memberships" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    var store = try Store.init(allocator, io, path);
+    defer store.deinit();
+    var service = Service.init(allocator);
+    defer service.deinit();
+    service.store = &store;
+    var source: Source = .{ .id = "disabled", .enabled = false, .source = .{ .kind = .file, .value = "list" }, .format = .domains };
+    const policy: Policy = .{ .interval_seconds = 60, .jitter_percent = 0, .retry_initial_seconds = 5, .retry_max_seconds = 20 };
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "startup.test\n" });
+    try service.add(io, source, base);
+    service.initializeSchedules(io, policy);
+    try std.testing.expect(service.health(source.id).?.state == .active);
+    try std.testing.expectEqual(@as(usize, 1), service.health(source.id).?.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), service.health(source.id).?.active_domain_count);
+    try std.testing.expect(service.health(source.id).?.next_refresh_at_ms != null);
+    try std.testing.expectEqual(@as(i64, 1), (try store.db.one(i64, "SELECT count(*) FROM list_domains", .{}, .{})).?);
+    try std.testing.expectEqual(@as(u32, 0), service.index.entries.count());
+
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "manual.test\nsecond.test\n" });
+    const selection: Service.Refresh = .{ .one = source.id };
+    service.beginRefresh(io, selection);
+    const attempted = service.health(source.id).?.last_attempt_at_ms;
+    var manual = try service.prepare(io, &.{source}, base, selection);
+    defer manual.deinit();
+    try manual.reserve(&service);
+    manual.commit(&service);
+    try std.testing.expect(service.health(source.id).?.refreshing);
+    try std.testing.expectEqual(attempted, service.health(source.id).?.last_attempt_at_ms);
+    try std.testing.expect(service.health(source.id).?.next_refresh_at_ms == null);
+    service.finishRefresh(io, selection, null, policy);
+    const successful = service.health(source.id).?;
+    const version = service.sources.get(source.id).?.version;
+    try std.testing.expectEqual(@as(usize, 2), successful.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), successful.domain_count);
+    try std.testing.expectEqual(@as(i64, 2), (try store.db.one(i64, "SELECT count(*) FROM list_domains", .{}, .{})).?);
+    try std.testing.expect(!service.contains("manual.test"));
+
+    // An automatic attempt uses the same import path even while DNS-disabled.
+    service.sources.getPtr(source.id).?.next_due_ms = std.Io.Clock.awake.now(io).toMilliseconds() - 1;
+    try std.testing.expectEqualStrings(source.id, service.nextDue(io).?);
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "partial.test\n||invalid.test^\n" });
+    service.beginRefresh(io, selection);
+    try std.testing.expect(service.nextDue(io) == null);
+    var scheduled = try service.prepare(io, &.{source}, base, selection);
+    defer scheduled.deinit();
+    try scheduled.reserve(&service);
+    scheduled.commit(&service);
+    service.finishRefresh(io, selection, null, policy);
+    const failed = service.health(source.id).?;
+    try std.testing.expect(failed.state == .degraded);
+    try std.testing.expectEqualStrings("InvalidListLine", failed.last_error.?);
+    try std.testing.expectEqual(successful.last_success_at_ms, failed.last_success_at_ms);
+    try std.testing.expectEqual(@as(u32, 1), failed.consecutive_failures);
+    try std.testing.expectEqual(@as(usize, 2), failed.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 0), failed.active_domain_count);
+    try std.testing.expectEqualDeep(version, service.sources.get(source.id).?.version);
+    try std.testing.expectEqual(@as(u32, 0), service.index.entries.count());
+    try std.testing.expectEqual(@as(i64, 2), (try store.db.one(i64, "SELECT count(*) FROM list_domains", .{}, .{})).?);
+    try std.testing.expectEqual(@as(i64, 0), (try store.db.one(i64, "SELECT count(*) FROM domains WHERE name = 'partial.test'", .{}, .{})).?);
+    try std.testing.expect(failed.next_refresh_at_ms.? - failed.last_completed_at_ms.? >= 5000);
+
+    // Enabling after the source disappears proves the disabled refresh persisted.
+    try temporary.dir.deleteFile(io, "list");
+    source.enabled = true;
+    var enabled = try service.prepare(io, &.{source}, base, .none);
+    defer enabled.deinit();
+    try enabled.reserve(&service);
+    enabled.commit(&service);
+    try std.testing.expect(service.contains("manual.test"));
+    try std.testing.expect(service.contains("second.test"));
+    try std.testing.expect(!service.contains("startup.test"));
+    try std.testing.expect(!service.contains("partial.test"));
+    try std.testing.expectEqual(@as(usize, 2), service.health(source.id).?.active_domain_count);
+}
+
+test "global policy applies to all schedules and metadata preserves deadlines" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "scheduled.test\n" });
+    var service = Service.init(allocator);
+    defer service.deinit();
+    var first: Source = .{
+        .id = "first",
+        .enabled = false,
+        .source = .{ .kind = .file, .value = "list" },
+        .format = .domains,
+    };
+    const second: Source = .{
+        .id = "second",
+        .enabled = false,
+        .source = first.source,
+        .format = .domains,
+    };
+    var defaults: Policy = .{ .interval_seconds = 60, .jitter_percent = 0, .retry_initial_seconds = 5, .retry_max_seconds = 20 };
+    try service.add(io, first, base);
+    try service.add(io, second, base);
+    service.initializeSchedules(io, defaults);
+    const original = service.sources.get(first.id).?;
+    try std.testing.expect(original.next_due_ms != null);
+    try std.testing.expect(service.sources.get(second.id).?.next_due_ms != null);
+    service.initializeSchedules(io, defaults);
+    try std.testing.expectEqual(original.next_due_ms, service.sources.get(first.id).?.next_due_ms);
+    defaults.interval_seconds = 120;
+    service.initializeSchedules(io, defaults);
+    try std.testing.expect(service.sources.get(first.id).?.next_due_ms.? >= original.next_due_ms.? + 59000);
+    try std.testing.expect(service.sources.get(second.id).?.next_due_ms.? >= original.next_due_ms.? + 59000);
+    try std.testing.expectEqual(@as(u32, 120), service.sources.get(first.id).?.schedule_policy.?.interval_seconds);
+    try std.testing.expectEqual(@as(u32, 120), service.sources.get(second.id).?.schedule_policy.?.interval_seconds);
+
+    // Source metadata and global schedule changes must not fetch missing files.
+    try temporary.dir.deleteFile(io, "list");
+    first.name = "Renamed";
+    var metadata = try service.prepare(io, &.{ first, second }, base, .none);
+    defer metadata.deinit();
+    try std.testing.expect(metadata.changes.items[0].health == null);
+    try metadata.reserve(&service);
+    metadata.commit(&service);
+    try std.testing.expectEqual(original.snapshot.ptr, service.sources.get(first.id).?.snapshot.ptr);
+    try std.testing.expectEqual(original.health.last_attempt_at_ms, service.health(first.id).?.last_attempt_at_ms);
+    service.sources.getPtr(first.id).?.next_due_ms = 0;
+    defaults.interval_seconds = 180;
+    service.initializeSchedules(io, defaults);
+    try std.testing.expect(service.sources.get(first.id).?.next_due_ms.? > 0);
+    try std.testing.expectEqual(@as(u32, 180), service.sources.get(first.id).?.schedule_policy.?.interval_seconds);
+
+    // Due selection uses monotonic runtime state, not the displayed wall clock.
+    service.sources.getPtr(first.id).?.next_due_ms = std.Io.Clock.awake.now(io).toMilliseconds() - 1;
+    service.sources.getPtr(first.id).?.health.next_refresh_at_ms = std.math.maxInt(i64);
+    try std.testing.expectEqualStrings(first.id, service.nextDue(io).?);
+    const selection: Service.Refresh = .{ .one = first.id };
+    service.beginRefresh(io, selection);
+    try std.testing.expect(service.health(first.id).?.refreshing);
+    try std.testing.expect(service.health(first.id).?.next_refresh_at_ms == null);
+    try std.testing.expect(service.nextDue(io) == null);
+    const attempted = service.health(first.id).?.last_attempt_at_ms;
+    try std.testing.expectError(error.FileNotFound, service.prepare(io, &.{ first, second }, base, selection));
+    service.finishRefresh(io, selection, error.FileNotFound, defaults);
+    const failed = service.health(first.id).?;
+    try std.testing.expect(!failed.refreshing);
+    try std.testing.expectEqual(attempted, failed.last_attempt_at_ms);
+    try std.testing.expect(failed.state == .degraded);
+    try std.testing.expectEqualStrings("FileNotFound", failed.last_error.?);
+    try std.testing.expectEqual(original.health.last_success_at_ms, failed.last_success_at_ms);
+    try std.testing.expectEqual(@as(u32, 1), failed.consecutive_failures);
+    try std.testing.expect(service.sources.get(second.id).?.health.consecutive_failures == 0);
+    try std.testing.expectEqual(original.snapshot.ptr, service.sources.get(first.id).?.snapshot.ptr);
+
+    service.beginRefresh(io, selection);
+    service.finishRefresh(io, selection, error.AccessDenied, defaults);
+    try std.testing.expectEqual(@as(u32, 2), service.health(first.id).?.consecutive_failures);
+    service.sources.getPtr(first.id).?.health.consecutive_failures = std.math.maxInt(u32);
+    service.beginRefresh(io, selection);
+    service.finishRefresh(io, selection, error.AccessDenied, defaults);
+    try std.testing.expectEqual(std.math.maxInt(u32), service.health(first.id).?.consecutive_failures);
+
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "recovered.test\n" });
+    service.beginRefresh(io, selection);
+    var recovered = try service.prepare(io, &.{ first, second }, base, selection);
+    defer recovered.deinit();
+    try recovered.reserve(&service);
+    recovered.commit(&service);
+    try std.testing.expect(service.health(first.id).?.refreshing);
+    service.finishRefresh(io, selection, null, defaults);
+    try std.testing.expectEqual(@as(u32, 0), service.health(first.id).?.consecutive_failures);
+    try std.testing.expect(service.health(first.id).?.last_error == null);
+    try std.testing.expectEqual(@as(u32, 0), service.index.entries.count());
+
+    defaults.enabled = false;
+    service.initializeSchedules(io, defaults);
+    try std.testing.expect(service.health(first.id).?.next_refresh_at_ms == null);
+    try std.testing.expect(service.health(second.id).?.next_refresh_at_ms == null);
+    try std.testing.expect(service.nextDue(io) == null);
+}
+
+test "failed refresh retains active RAM while reporting newer compatible durable snapshot" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/lists.db", .{base}, 0);
+    defer allocator.free(path);
+    var store = try Store.init(allocator, io, path);
+    defer store.deinit();
+    var service = Service.init(allocator);
+    defer service.deinit();
+    service.store = &store;
+    var source: Source = .{ .id = "source", .source = .{ .kind = .file, .value = "list" }, .format = .domains };
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "active.test\n" });
+    try service.add(io, source, base);
+    const original = service.sources.get(source.id).?;
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "durable.test\nsecond.test\n" });
+    var saved_at: ?i64 = null;
+    {
+        // Durable preparation may complete without subsequent RAM publication.
+        var unpublished = try service.prepare(io, &.{source}, base, .all);
+        defer unpublished.deinit();
+        saved_at = unpublished.changes.items[0].health.?.last_success_at_ms;
+    }
+    try std.testing.expect(service.contains("active.test"));
+    try std.testing.expect(!service.contains("durable.test"));
+    try temporary.dir.writeFile(io, .{ .sub_path = "list", .data = "partial.test\n||invalid.test^\n" });
+    const selection: Service.Refresh = .{ .one = source.id };
+    service.beginRefresh(io, selection);
+    var fallback = try service.prepare(io, &.{source}, base, selection);
+    defer fallback.deinit();
+    try std.testing.expect(fallback.changes.items[0].snapshot == null);
+    try fallback.reserve(&service);
+    fallback.commit(&service);
+    service.finishRefresh(io, selection, null, .{});
+    const current = service.sources.get(source.id).?;
+    try std.testing.expectEqual(original.snapshot.ptr, current.snapshot.ptr);
+    try std.testing.expectEqualDeep(original.version, current.version);
+    try std.testing.expectEqual(original.active_last_success_at_ms, current.active_last_success_at_ms);
+    try std.testing.expectEqual(saved_at, current.health.last_success_at_ms);
+    try std.testing.expectEqual(@as(usize, 2), current.health.snapshot_domain_count);
+    try std.testing.expectEqual(@as(usize, 1), current.health.active_domain_count);
+    try std.testing.expectEqual(@as(usize, 1), current.health.domain_count);
+    try std.testing.expect(current.health.state == .degraded);
+    try std.testing.expectEqual(@as(u32, 1), current.health.consecutive_failures);
+    try std.testing.expect(service.contains("active.test"));
+    try std.testing.expect(!service.contains("durable.test"));
+
+    // A changed location cannot retain memberships from the old fingerprint.
+    source.source.value = "missing";
+    var incompatible = try service.prepare(io, &.{source}, base, .none);
+    defer incompatible.deinit();
+    try incompatible.reserve(&service);
+    incompatible.commit(&service);
+    try std.testing.expect(service.health(source.id).?.state == .unavailable);
+    try std.testing.expect(service.health(source.id).?.last_success_at_ms == null);
+    try std.testing.expect(service.sources.get(source.id).?.active_last_success_at_ms == null);
+    try std.testing.expect(!service.contains("active.test"));
 }

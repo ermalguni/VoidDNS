@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const Source = @import("../blocklist/source.zig").Source;
+const RefreshPolicy = @import("../blocklist/refresh.zig").Policy;
 
 /// JSON-shaped editable data. A parsed document owns its strings and arrays;
 /// constructed documents may borrow data until converted with fromDocument.
@@ -45,6 +46,7 @@ pub const Document = struct {
         addresses: []const []const u8,
     } = &.{},
     blocks: struct {
+        refresh: RefreshPolicy = .{},
         lists: []const Source.Definition = &.{},
         domains: []const []const u8 = &.{},
     } = .{},
@@ -116,6 +118,10 @@ const Contract = struct {
             else => {},
         }
         switch (@typeInfo(T)) {
+            .bool => {
+                if (token_type != .true and token_type != .false) return self.invalid(path, "expected a JSON boolean");
+                try self.scanner.skipValue();
+            },
             .int => {
                 if (token_type != .number) return self.invalid(path, "expected an integer JSON number");
                 const token = try self.scanner.nextAlloc(self.allocator, .alloc_if_needed);

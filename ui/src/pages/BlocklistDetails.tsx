@@ -6,7 +6,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, useApi, type Schema } from '../api';
 import { ErrorNotice, PageHeading } from '../components';
 import { DomainLink, requestsForDomain } from '../DomainInspection';
-import { ResourceEditor } from './Collections';
+import { ResourceEditor, SourceImportStatus } from './Collections';
 
 export function BlocklistDetailsPage() {
   const { id = '' } = useParams();
@@ -16,7 +16,7 @@ export function BlocklistDetailsPage() {
   const [params, setParams] = useSearchParams();
   const [selection, setSelection] = useState<{ action: 'edit' | 'refresh' | 'delete'; id: string } | null>(null);
   const sourcePath = `/blocklists/${encodeURIComponent(id)}`;
-  const source = useQuery({ queryKey: ['/blocklists', sourcePath], queryFn: ({ signal }) => api.read<Schema<'SourceView'>>(sourcePath, signal) });
+  const source = useQuery({ queryKey: ['/blocklists', sourcePath], queryFn: ({ signal }) => api.read<Schema<'SourceView'>>(sourcePath, signal), refetchInterval: 5000 });
   const view = source.data?.data;
   const tab = params.get('tab') === 'settings' ? 'settings' : 'domains';
   const requestedSnapshot = params.get('snapshot');
@@ -47,8 +47,8 @@ export function BlocklistDetailsPage() {
     <PageHeading title={view?.name || id} description={view?.name ? id : undefined} />
     <ErrorNotice error={source.error} />
     {source.isPending ? <Skeleton height={100} /> : source.isError ? <Button variant="default" onClick={() => void source.refetch()}>Retry loading source</Button> : view ? <>
-      <Group gap="sm"><Badge color={view.status.state === 'active' ? 'teal' : view.status.state === 'degraded' ? 'yellow' : 'gray'} variant="light">{view.status.state}</Badge><Text size="sm">{view.status.domain_count.toLocaleString()} runtime domains</Text><Text size="sm" c="dimmed">Active snapshot import: {view.status.last_success_at_ms === null ? 'None' : new Date(view.status.last_success_at_ms).toLocaleString()}</Text></Group>
-      {view.status.last_error ? <Alert color={view.status.state === 'unavailable' ? 'orange' : 'gray'} title={`Last import error: ${view.status.last_error}`}>{view.status.state === 'degraded' ? 'The active list is using a compatible saved snapshot.' : view.status.state === 'disabled' ? 'This source is disabled and does not contribute current policy.' : 'No compatible snapshot is contributing current policy.'}</Alert> : null}
+      <SourceImportStatus source={view} />
+      {view.status.last_error ? <Alert color={view.status.state === 'unavailable' ? 'orange' : 'gray'} title="Latest import failed">{view.status.state === 'degraded' ? 'Compatible last-known-good data is retained indefinitely. Enabled sources continue using it for DNS.' : 'No compatible snapshot is available.'} {!view.enabled ? 'This source is disabled and does not contribute DNS rules.' : ''}</Alert> : null}
       <Tabs value={tab} onChange={value => change({ tab: value === 'settings' ? 'settings' : null }, false)}>
         <Tabs.List><Tabs.Tab value="domains">Domains</Tabs.Tab><Tabs.Tab value="settings">Settings</Tabs.Tab></Tabs.List>
         <Tabs.Panel value="domains" pt="lg"><Stack gap="md">
@@ -70,7 +70,7 @@ export function BlocklistDetailsPage() {
         <Tabs.Panel value="settings" pt="lg"><Stack>
           <Table><Table.Tbody>{[['Source ID', view.id], ['Enabled', view.enabled ? 'Yes' : 'No'], ['Location', view.source.value], ['Kind', view.source.kind], ['Format', view.format], ['Provenance', view.api_managed ? 'API-managed' : 'Operator-provided']].map(([label, value]) => <Table.Tr key={label}><Table.Th>{label}</Table.Th><Table.Td>{value}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
           <Group><Button onClick={() => setSelection({ action: 'edit', id })}>Edit source</Button><Button variant="light" onClick={() => setSelection({ action: 'refresh', id })}>Refresh source</Button><Button variant="subtle" color="red" onClick={() => setSelection({ action: 'delete', id })}>Delete source</Button></Group>
-          <Text size="sm" c="dimmed">Disabling retains the saved snapshot but removes active memberships. Refresh imports data, not unapplied configuration changes. DNS lookups use RAM only.</Text>
+          <Text size="sm" c="dimmed">All sources use the global refresh settings on the Blocklists page. Disabling removes active memberships, but scheduled and manual imports still update saved snapshots. Manual refresh remains available when global scheduling is off. Refresh uses active definitions, not unapplied configuration changes. DNS lookups use RAM only.</Text>
         </Stack></Tabs.Panel>
       </Tabs>
     </> : null}

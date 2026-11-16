@@ -27,6 +27,7 @@ pub const Notification = union(enum) {
     worker_failed: Failure,
     control_failed: anyerror,
     operation_ready,
+    refresh_tick,
 };
 
 /// Bounded request mailbox with reserved failure slots. A finishing worker
@@ -41,6 +42,7 @@ pub const Mailbox = struct {
     worker_failure: ?Failure = null,
     control_failure: ?anyerror = null,
     operation_ready: bool = false,
+    refresh_tick: bool = false,
     api_closed: bool = false,
 
     pub fn putApi(self: *Mailbox, io: std.Io, call: *Call) !void {
@@ -71,6 +73,17 @@ pub const Mailbox = struct {
         defer self.mutex.unlock(io);
         self.operation_ready = true;
         self.available.signal(io);
+    }
+
+    /// Coalesce timer wakes outside the bounded command queue.
+    pub fn refreshTicks(self: *Mailbox, io: std.Io) std.Io.Cancelable!void {
+        while (true) {
+            try io.sleep(.fromSeconds(1), .awake);
+            try self.mutex.lock(io);
+            self.refresh_tick = true;
+            self.available.signal(io);
+            self.mutex.unlock(io);
+        }
     }
 
     pub fn put(self: *Mailbox, io: std.Io, request: Request) std.Io.Cancelable!void {
@@ -104,6 +117,10 @@ pub const Mailbox = struct {
                 self.count -= 1;
                 self.space.signal(io);
                 return .{ .request = request };
+            }
+            if (self.refresh_tick) {
+                self.refresh_tick = false;
+                return .refresh_tick;
             }
             try self.available.wait(io, &self.mutex);
         }
@@ -269,4 +286,17 @@ test "API queue rejects saturation and closure completes borrowed calls" {
     mailbox.closeApi(io);
     try std.testing.expectError(error.ShuttingDown, call.awaitResult(io));
     try std.testing.expectError(error.ShuttingDown, mailbox.putApi(io, &call));
+}
+
+test "refresh timer wakes coalesce behind commands and operation completion" {
+    const io = std.testing.io;
+    var mailbox: Mailbox = .{};
+    defer mailbox.deinit(std.testing.allocator);
+    mailbox.refresh_tick = true;
+    try mailbox.put(io, .reload);
+    mailbox.operationReady(io);
+    try std.testing.expect((try mailbox.receive(io)) == .operation_ready);
+    try std.testing.expect((try mailbox.receive(io)).request == .reload);
+    try std.testing.expect((try mailbox.receive(io)) == .refresh_tick);
+    try std.testing.expect(!mailbox.refresh_tick);
 }

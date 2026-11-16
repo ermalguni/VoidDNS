@@ -2585,7 +2585,7 @@
     },
     "/blocklists/refresh": {
       "post": {
-        "summary": "Atomically refresh all enabled sources",
+        "summary": "Atomically refresh all sources, including disabled sources, regardless of global scheduling",
         "operationId": "post_blocklists_refresh",
         "parameters": [
           {
@@ -4899,9 +4899,21 @@
         },
         "additionalProperties": false
       },
+      "RefreshPolicy": {
+        "type": "object",
+        "description": "The single global scheduled import policy, configured only at blocks.refresh and applied to all blocklists, including disabled sources. Missing fields use defaults. Non-null objects only. enabled=false disables scheduling globally without disabling manual refresh or startup imports. Source enabled flags control DNS membership, not imports. retry_max_seconds must be at least retry_initial_seconds.",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "interval_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 86400 },
+          "jitter_percent": { "type": "integer", "minimum": 0, "maximum": 100, "default": 10 },
+          "retry_initial_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 300 },
+          "retry_max_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 21600 }
+        },
+        "additionalProperties": false
+      },
       "Source": {
         "type": "object",
-        "description": "Editable blocklist source definition. Runtime status is response-only and is rejected in input.",
+        "description": "Editable blocklist source definition. All sources use the global blocks.refresh policy. Runtime status is response-only and is rejected in input.",
         "properties": {
           "id": {
             "type": "string",
@@ -4958,12 +4970,12 @@
       },
       "SourceHealth": {
         "type": "object",
-        "description": "Runtime import health, never persisted into configuration JSON. Error names contain no source location.",
+        "description": "Runtime import health independent of source.enabled. Last-known-good compatible data is retained indefinitely. Scheduler deadlines are process-local; timestamp fields are Unix epoch milliseconds.",
         "properties": {
           "state": {
             "type": "string",
-            "enum": ["disabled", "active", "degraded", "unavailable"],
-            "description": "active: fetch succeeded; degraded: fetch failed and a compatible snapshot is serving; unavailable: enabled without a compatible snapshot; disabled: not serving imported names."
+            "enum": ["active", "degraded", "unavailable"],
+            "description": "active: latest import succeeded; degraded: import failed with a compatible snapshot retained; unavailable: no compatible snapshot. Disabled sources can have any import health."
           },
           "last_error": {
             "type": ["string", "null"],
@@ -4977,15 +4989,22 @@
           "domain_count": {
             "type": "integer",
             "minimum": 0,
-            "description": "Domain membership count for this source's runtime snapshot."
-          }
+            "description": "Compatibility alias for active_domain_count; zero for disabled sources."
+          },
+          "snapshot_domain_count": { "type": "integer", "minimum": 0, "description": "Retained compatible imported names, including disabled sources." },
+          "active_domain_count": { "type": "integer", "minimum": 0, "description": "Names contributing to the DNS index; zero when disabled." },
+          "last_attempt_at_ms": { "type": ["integer", "null"], "format": "int64" },
+          "last_completed_at_ms": { "type": ["integer", "null"], "format": "int64" },
+          "consecutive_failures": { "type": "integer", "minimum": 0 },
+          "next_refresh_at_ms": { "type": ["integer", "null"], "format": "int64", "description": "Estimated wall-clock due time; null when global scheduling is disabled or no schedule is pending." },
+          "refreshing": { "type": "boolean" }
         },
-        "required": ["state", "last_error", "last_success_at_ms", "domain_count"],
+        "required": ["state", "last_error", "last_success_at_ms", "domain_count", "snapshot_domain_count", "active_domain_count", "last_attempt_at_ms", "last_completed_at_ms", "consecutive_failures", "next_refresh_at_ms", "refreshing"],
         "additionalProperties": false
       },
       "SourceView": {
         "type": "object",
-        "description": "Response-only blocklist source definition and current runtime health. Use Source, without status, for writes.",
+        "description": "Response-only blocklist source definition and current runtime health. All sources use the global blocks.refresh policy. Use Source, without status, for writes.",
         "properties": {
           "id": { "$ref": "#/components/schemas/Source/properties/id" },
           "name": { "$ref": "#/components/schemas/Source/properties/name" },
@@ -5167,7 +5186,9 @@
           },
           "blocks": {
             "type": "object",
+            "description": "Blocklist definitions and the single global refresh policy shared by every list, including disabled lists.",
             "properties": {
+              "refresh": { "$ref": "#/components/schemas/RefreshPolicy" },
               "domains": {
                 "type": "array",
                 "items": {
@@ -5557,6 +5578,7 @@
       },
       "SourceDefinition": {
         "type": "object",
+        "description": "Configured blocklist source. All sources share Config.blocks.refresh; source enabled controls DNS membership only.",
         "properties": {
           "id": {
             "type": "string",

@@ -302,7 +302,7 @@ export interface paths {
         get: operations["get_blocklists_reserved_refresh_id"];
         /** Operate on the source whose ID is literally refresh */
         put: operations["put_blocklists_reserved_refresh_id"];
-        /** Atomically refresh all enabled sources */
+        /** Atomically refresh all sources, including disabled sources, regardless of global scheduling */
         post: operations["post_blocklists_refresh"];
         /** Operate on the source whose ID is literally refresh */
         delete: operations["delete_blocklists_reserved_refresh_id"];
@@ -580,7 +580,20 @@ export interface components {
             /** @default true */
             enabled: boolean;
         };
-        /** @description Editable blocklist source definition. Runtime status is response-only and is rejected in input. */
+        /** @description The single global scheduled import policy, configured only at blocks.refresh and applied to all blocklists, including disabled sources. Missing fields use defaults. Non-null objects only. enabled=false disables scheduling globally without disabling manual refresh or startup imports. Source enabled flags control DNS membership, not imports. retry_max_seconds must be at least retry_initial_seconds. */
+        RefreshPolicy: {
+            /** @default true */
+            enabled: boolean;
+            /** @default 86400 */
+            interval_seconds: number;
+            /** @default 10 */
+            jitter_percent: number;
+            /** @default 300 */
+            retry_initial_seconds: number;
+            /** @default 21600 */
+            retry_max_seconds: number;
+        };
+        /** @description Editable blocklist source definition. All sources use the global blocks.refresh policy. Runtime status is response-only and is rejected in input. */
         Source: {
             id: string;
             name?: string | null;
@@ -596,13 +609,13 @@ export interface components {
             /** @description Persistent provenance marker enforced by the server. New/content-changed sources become managed; a client cannot clear the marker on an existing managed source. */
             api_managed?: boolean;
         };
-        /** @description Runtime import health, never persisted into configuration JSON. Error names contain no source location. */
+        /** @description Runtime import health independent of source.enabled. Last-known-good compatible data is retained indefinitely. Scheduler deadlines are process-local; timestamp fields are Unix epoch milliseconds. */
         SourceHealth: {
             /**
-             * @description active: fetch succeeded; degraded: fetch failed and a compatible snapshot is serving; unavailable: enabled without a compatible snapshot; disabled: not serving imported names.
+             * @description active: latest import succeeded; degraded: import failed with a compatible snapshot retained; unavailable: no compatible snapshot. Disabled sources can have any import health.
              * @enum {string}
              */
-            state: "disabled" | "active" | "degraded" | "unavailable";
+            state: "active" | "degraded" | "unavailable";
             /** @description Safe error name from the latest failed import, without URLs or file paths. */
             last_error: string | null;
             /**
@@ -610,10 +623,25 @@ export interface components {
              * @description Unix epoch milliseconds of the snapshot's last successful import, or null if none.
              */
             last_success_at_ms: number | null;
-            /** @description Domain membership count for this source's runtime snapshot. */
+            /** @description Compatibility alias for active_domain_count; zero for disabled sources. */
             domain_count: number;
+            /** @description Retained compatible imported names, including disabled sources. */
+            snapshot_domain_count: number;
+            /** @description Names contributing to the DNS index; zero when disabled. */
+            active_domain_count: number;
+            /** Format: int64 */
+            last_attempt_at_ms: number | null;
+            /** Format: int64 */
+            last_completed_at_ms: number | null;
+            consecutive_failures: number;
+            /**
+             * Format: int64
+             * @description Estimated wall-clock due time; null when global scheduling is disabled or no schedule is pending.
+             */
+            next_refresh_at_ms: number | null;
+            refreshing: boolean;
         };
-        /** @description Response-only blocklist source definition and current runtime health. Use Source, without status, for writes. */
+        /** @description Response-only blocklist source definition and current runtime health. All sources use the global blocks.refresh policy. Use Source, without status, for writes. */
         SourceView: {
             id: components["schemas"]["Source"]["id"];
             name: components["schemas"]["Source"]["name"];
@@ -684,7 +712,9 @@ export interface components {
             api: components["schemas"]["ApiSettings"];
             ui: components["schemas"]["UiSettings"];
             records?: components["schemas"]["RecordInput"][];
+            /** @description Blocklist definitions and the single global refresh policy shared by every list, including disabled lists. */
             blocks?: {
+                refresh?: components["schemas"]["RefreshPolicy"];
                 domains?: string[];
                 lists?: components["schemas"]["SourceDefinition"][];
             };
@@ -772,6 +802,7 @@ export interface components {
             capacity: number;
             occupied_slots: number;
         };
+        /** @description Configured blocklist source. All sources share Config.blocks.refresh; source enabled controls DNS membership only. */
         SourceDefinition: {
             id: string;
             name?: string;
